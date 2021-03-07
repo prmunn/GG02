@@ -1,4 +1,4 @@
-#!/bin/sh
+#!/usr/bin/bash
 #SBATCH -J ATACseq
 #SBATCH -o %x.out
 #SBATCH -n 12
@@ -45,6 +45,80 @@ gAlias=(
 ["mm10"]="mouse" \
 ["hg38"]="human"
 )
+
+PAD_DIR="padUMI-fastq"
+ORIG_FASTQ="orig-fastq"
+
+# Step 1) Use cutadapt to find the position of the ME sequence in the R2 read 
+# (no modification of reads, just generate info file with ME position)
+findMESequence(){
+
+    cd fastqs/parsed-BCs/${PAD_DIR}
+
+    RELATIVE_ORIG_FASTQ=../../"${ORIG_FASTQ}"
+
+    # Delete summary files from any prior runs
+    rm *_R2_info_summary.txt
+
+    for i in *.txt
+    do
+        iSUB=`echo $i | cut -d "_" -f 1`
+        ls -1 "${RELATIVE_ORIG_FASTQ}"/"${iSUB}"*_R2_001.fastq.gz > input_fastq
+        readarray input_fastq_file_list < input_fastq
+        input_fastq_file=`echo $input_fastq_file_list | cut -d " " -f 9`
+
+        echo $i
+        echo $iSUB
+        echo $input_fastq_file
+        echo "${RELATIVE_ORIG_FASTQ}"/"$input_fastq_file"
+
+        # Start with parsing ME seq in R2 and padding UMI using cutadapt (with no reads output file, only info file)
+        #cutadapt -g AGATGTGTATAAGAGACAG \
+        #--info-file $i \
+        #-e 0.11 \
+        #-j 10 \
+        #--match-read-wildcards \
+        #--action none \
+        #-o /dev/null \
+        #"${RELATIVE_ORIG_FASTQ}"/"$input_fastq_file"
+
+        # Summary counts for columns 2, 3, and 4
+        #awk -F '\t' '{a[$2]++; if($2>=0) {b[$3]++; c[$4]++;} else next;} END {print "col2=mismatch"; for(i in a) print a[i],i; print "\ncol3=startpost"; for(j in b) print b[j],j; print "\ncol4=endpos"; for(k in c) print c[k],k;}' \
+        #$i > "${iSUB}"_R2_info_summary.txt
+    done
+
+    cd ../../..
+
+}
+
+# Step 2) Custom shell script reads in the info file from step 1 and reconfigures R2 
+# to build the combinatorial BC (integrate I1 and I2 reads) and ‘pad out’ the UMI
+parseVarUMI(){
+
+    cd fastqs/parsed-BCs/${PAD_DIR}
+
+    RELATIVE_ORIG_FASTQ=../../"${ORIG_FASTQ}"
+
+    for i in *.txt.gz
+    do
+        iSUB=`echo $i | cut -d "_" -f 1`
+        ls -1 "${RELATIVE_ORIG_FASTQ}"/"${iSUB}"*_R2_001.fastq.gz > input_fastq
+        readarray input_fastq_file_list < input_fastq
+        input_fastq_file=`echo $input_fastq_file_list | cut -d " " -f 9`
+
+        #../parse_varUMI.awk <(zcat $i) <(zcat "${RELATIVE_ORIG_FASTQ}"/"$input_fastq_file") | gzip > ../"${iSUB}"_padUMI_R2.fastq.gz
+
+    done
+
+    cd ../../..
+
+}
+
+
+
+
+
+
 
 
 trimPE(){
@@ -449,18 +523,20 @@ fi
                         if [ ${genomeDir[${DIR}]+_} ]; then
                             echo Reference genome selected = $DIR
                             echo
-                            alignPE
-                            sort
-                            rmMT
-                            markDups
-                            dedupBAM
-                            callPeak
-                            mergedPeaks
-                            saf
-                            frip
-                            tagDir
-                            annotatePeaks
-                            bedGraphs
+                            findMESequence
+                            parseVarUMI
+                            # alignPE
+                            # sort
+                            # rmMT
+                            # markDups
+                            # dedupBAM
+                            # callPeak
+                            # mergedPeaks
+                            # saf
+                            # frip
+                            # tagDir
+                            # annotatePeaks
+                            # bedGraphs
                         else
                             echo "The reference genome provided '"$DIR"' is not available"
                             exit 1

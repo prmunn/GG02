@@ -47,6 +47,7 @@ gAlias=(
 )
 
 PAD_DIR="padUMI-fastq"
+I7PCR_DEMUX_FASTQ="i7PCR_demux_fastq"
 ORIG_FASTQ="orig-fastq"
 
 # Step 1) Use cutadapt to find the position of the ME sequence in the R2 read 
@@ -58,34 +59,39 @@ findMESequence(){
     RELATIVE_ORIG_FASTQ=../../"${ORIG_FASTQ}"
 
     # Delete summary files from any prior runs
-    rm *_R2_info_summary.txt
+    # rm *_R2_info_summary.txt
 
-    for i in *.txt
+    for i in *_R2_info_j10.txt
     do
         iSUB=`echo $i | cut -d "_" -f 1`
         ls -1 "${RELATIVE_ORIG_FASTQ}"/"${iSUB}"*_R2_001.fastq.gz > input_fastq
         readarray input_fastq_file_list < input_fastq
         input_fastq_file=`echo $input_fastq_file_list | cut -d " " -f 9`
 
-        echo $i
-        echo $iSUB
-        echo $input_fastq_file
-        echo "${RELATIVE_ORIG_FASTQ}"/"$input_fastq_file"
+        echo
+        echo "findMESequence()"
+        echo "i: "$i
+        # echo "iSUB: "$iSUB
+        # echo "input_fastq_file: "$input_fastq_file
+        echo
 
         # Start with parsing ME seq in R2 and padding UMI using cutadapt (with no reads output file, only info file)
-        #cutadapt -g AGATGTGTATAAGAGACAG \
-        #--info-file $i \
-        #-e 0.11 \
-        #-j 10 \
-        #--match-read-wildcards \
-        #--action none \
-        #-o /dev/null \
-        #"${RELATIVE_ORIG_FASTQ}"/"$input_fastq_file"
+        cutadapt -g AGATGTGTATAAGAGACAG \
+        --info-file $i \
+        -e 0.11 \
+        -j 10 \
+        --match-read-wildcards \
+        --action none \
+        -o /dev/null \
+        $input_fastq_file
 
         # Summary counts for columns 2, 3, and 4
-        #awk -F '\t' '{a[$2]++; if($2>=0) {b[$3]++; c[$4]++;} else next;} END {print "col2=mismatch"; for(i in a) print a[i],i; print "\ncol3=startpost"; for(j in b) print b[j],j; print "\ncol4=endpos"; for(k in c) print c[k],k;}' \
-        #$i > "${iSUB}"_R2_info_summary.txt
+        awk -F '\t' '{a[$2]++; if($2>=0) {b[$3]++; c[$4]++;} else next;} END {print "col2=mismatch"; for(i in a) print a[i],i; print "\ncol3=startpost"; for(j in b) print b[j],j; print "\ncol4=endpos"; for(k in c) print c[k],k;}' \
+        $i > "${iSUB}"_R2_info_summary.txt
     done
+
+    # Clean up
+    rm input_fastq
 
     cd ../../..
 
@@ -96,7 +102,7 @@ findMESequence(){
 parseVarUMI(){
 
     cd fastqs/parsed-BCs/${PAD_DIR}
-
+    
     RELATIVE_ORIG_FASTQ=../../"${ORIG_FASTQ}"
 
     for i in *.txt.gz
@@ -106,13 +112,71 @@ parseVarUMI(){
         readarray input_fastq_file_list < input_fastq
         input_fastq_file=`echo $input_fastq_file_list | cut -d " " -f 9`
 
-        #../parse_varUMI.awk <(zcat $i) <(zcat "${RELATIVE_ORIG_FASTQ}"/"$input_fastq_file") | gzip > ../"${iSUB}"_padUMI_R2.fastq.gz
+        echo
+        echo "parseVarUMI()"
+        echo "i: "$i
+        echo "iSUB: "$iSUB
+        echo "input_fastq_file: "$input_fastq_file
+        echo
+        
+        #../parse_varUMI.awk <(zcat $i) <(zcat $input_fastq_file) | gzip > ../"${iSUB}"_padUMI_R2.fastq.gz
 
     done
 
     cd ../../..
 
 }
+
+# Step 3a) Optional: generate combBC whitelist with UMI_tools whitelist
+predictI7TagBCs() {
+
+    # Assumes that environment variables already set up for UMI_tools
+    # export PYTHONPATH=/programs/UMI-tools/lib/python3.6/site-packages:/programs/UMI-tools/lib64/python3.6/site-packages
+    # export PATH=/programs/UMI-tools/bin:$PATH
+
+    cd fastqs/parsed-BCs/
+
+    umi_tools whitelist --bc-pattern=NNNNNNNNNNCCCCCCCCCC \
+    --error-correct-threshold=1 \
+    --ed-above-threshold=correct \
+    --extract-method string \
+    -L G201123J_padUMI_predictBCwhitelist.txt \
+    -I G201123J_padUMI_R2.fastq.gz \
+    -S G201123J_predictedBCwhitelist.txt
+
+    cd ../..
+
+}
+
+# Step 3b) Use UMI_tools extract to reconfigure the R1/R2 headers to contain UMI+combBC.
+moveUMItoHeader() {
+
+    # Assumes that environment variables already set up for UMI_tools
+    # export PYTHONPATH=/programs/UMI-tools/lib/python3.6/site-packages:/programs/UMI-tools/lib64/python3.6/site-packages
+    # export PATH=/programs/UMI-tools/bin:$PATH
+
+    cd fastqs/parsed-BCs/${PAD_DIR}
+
+    umi_tools extract --extract-method=string \
+    --quality-filter-mask 20 \
+    --quality-encoding phred33 \
+    -p NNNNNNNNNN \
+    -I G201123J_padUMI_R2.fastq.gz \
+    -S G201123J_UMI_R2.fq.gz \
+    --read2-in=../../orig-fastq/G201123J_CKDL200167681-1a_HF5L2CCX2_S1_L005_R1_001.fastq.gz \
+    --read2-out=G201123J_UMI_R1.fq.gz
+
+    cd ../../..
+
+}
+
+# Step 4) Use cutadapt to trim (and require) 5’ME in R2. Reads that don’t have the ME seq in the right place 
+# (after parsing/moving UMI+combBC) are written to a separate output file (maintaining R1/R2 pairing).
+
+# Step 5) Use cutadapt to trim R1/R2 for 3’ME-rev (e.g. small inserts) and for 3’quality 
+# (standard 3’adaptor/quality trimming for PE reads). Then move to mapping, peak calling steps.
+
+
 
 
 
@@ -525,6 +589,8 @@ fi
                             echo
                             findMESequence
                             parseVarUMI
+                            predictI7TagBCs
+                            moveUMItoHeader
                             # alignPE
                             # sort
                             # rmMT
@@ -581,7 +647,7 @@ else
 
     echo "ENV INFO: " >> beta5.atac.log
     echo >> beta5.atac.log
-    echo "STAR version:" `~/bin/STAR-2.7.0e/bin/Linux_x86_64/STAR --version` >> beta5.atac.log
+    # echo "STAR version:" `~/bin/STAR-2.7.0e/bin/Linux_x86_64/STAR --version` >> beta5.atac.log
     echo "multiqc version:" `~/miniconda2/envs/RSC/bin/multiqc --version` >> beta5.atac.log
     echo "samtools version:" `/programs/bin/samtools/samtools --version` >> beta5.atac.log
     echo "macs2 version: macs2 2.1.0.20150731 " >> beta5.atac.log

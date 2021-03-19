@@ -12,17 +12,20 @@ usage(){
     echo
     echo
 
-    echo "Usage: bash" $0 "-f arg [-h arg] [-p arg] [-d args] [-t arg] [-g arg] [-q arg] [-s arg]"
+    echo "Usage: bash" $0 "-f arg -g arg [-h arg] [-p arg] [-d args] [-t arg] [-q arg] [-s arg] [-a arg]"
+    echo
+    echo "Example: bash" $0 "-f GIA0130-AdrianBarnyard/ -g hg38_and_mm10 -s findMESequence"
     echo
     echo "---------------------------------------------------------------------------------------------------------------"
     echo " -f  --> Folder containing data files (required)"
+    echo " -g  --> Reference Genome <mm10 or hg38 or hg38_and_mm10> (required)"
     echo "[-h] --> Display Help"
     echo "[-p] --> Project Identifier Number"
     echo "[-d] --> Comma Spearated Values for Delimiter and Field <delim,field or default> default: _,5 "
     echo "[-t] --> Trimming <nextseq or nova>;"
-    echo "[-g] --> Reference Genome <mm10 or hg38>"
     echo "[-q] --> Execute atacQC.R script <yes>"
     echo "[-s] --> Execute single step"
+    echo "[-a] --> Add duplicate barcode to 5' end of R2 read <i5 or i7i5>, default: No barcode added"
     echo "---------------------------------------------------------------------------------------------------------------"
 }
 
@@ -32,24 +35,25 @@ declare -A genomeDir
 
 genomeDir=(
 ["mm10"]="/workdir/genomes/Mus_musculus/mm10/ENSEMBL/BWAIndex/genome.fa" \
-["hg38"]="/workdir/genomes/Homo_sapiens/hg38/ENSEMBL/bwa.index/Homo_sapiens.GRCh38.dna.toplevel.fa"
+["hg38"]="/workdir/genomes/Homo_sapiens/hg38/ENSEMBL/bwa.index/Homo_sapiens.GRCh38.dna.toplevel.fa" \
+["hg38_and_mm10"]="/workdir/singleCellData/10x_reference_files/refdata-cellranger-atac-GRCh38-and-mm10-1.2.0/fasta/genome.fa"
 )
 
 declare -A gtfs
 
 gtfs=(
 ["mm10"]="/workdir/genomes/Mus_musculus/mm10/ENSEMBL/Mus_musculus.GRCm38.96.gtf" \
-["hg38"]="/workdir/genomes/Homo_sapiens/hg38/ENSEMBL/Homo_sapiens.GRCh38.96.gtf"
+["hg38"]="/workdir/genomes/Homo_sapiens/hg38/ENSEMBL/Homo_sapiens.GRCh38.96.gtf" \
+["hg38_and_mm10"]="/workdir/singleCellData/10x_reference_files/refdata-cellranger-atac-GRCh38-and-mm10-1.2.0/genes/genes.gtf"
 )
 
 declare -A gAlias # for compatibility with atacQC.R
 gAlias=(
 ["mm10"]="mouse" \
-["hg38"]="human"
+["hg38"]="human" \
+["hg38_and_mm10"]="human and mouse"
 )
 
-# PAD_DIR="padUMI-fastq"
-# I7PCR_DEMUX_FASTQ="i7PCR_demux_fastq"
 ORIG_FASTQ="orig-fastqs"
 
 # Step 1) Use cutadapt to find the position of the ME sequence in the R2 read 
@@ -74,7 +78,7 @@ findMESequence(){
     input_R2_fastq_file=("${RELATIVE_ORIG_FASTQ}"/*_R2_001.fastq.gz)
 
     echo
-    echo "findMESequence()"
+    echo "Running module findMESequence()"
     echo "input_R2_fastq_file: "$input_R2_fastq_file
     echo
 
@@ -100,7 +104,7 @@ findMESequence(){
 }
 
 # Step 2) Merge I1 and I2 into R2 and pad UMIs with custom shell script 
-horizontalMerge_padUMI(){
+horizontalMerge_padUMI_addDupBC(){
 
     cd "${FOLDER}"/fastqs/parsed_BCs/
 
@@ -109,20 +113,45 @@ horizontalMerge_padUMI(){
     # Set file names
     input_R2_fastq_file=("${RELATIVE_ORIG_FASTQ}"/*_R2_001.fastq.gz)
     input_I1_fastq_file=("${RELATIVE_ORIG_FASTQ}"/*_I1_001.fastq.gz)
-    input_I2_fastq_file=("${RELATIVE_ORIG_FASTQ}"/*_I2.f*.gz)
+    input_I2_fastq_file=("${RELATIVE_ORIG_FASTQ}"/*_I2*.f*.gz)
     file_prefix=`echo $(basename $input_R2_fastq_file .gz) | cut -d "_" -f 1`
 
     echo
-    echo "horizontalMerge_padUMI()"
+    echo "Running module horizontalMerge_padUMI_addDupBC()"
     echo "file_prefix: "$file_prefix
     echo "input_R2_fastq_file: "$input_R2_fastq_file
     echo "input_I1_fastq_file: "$input_I1_fastq_file
     echo "input_I2_fastq_file: "$input_I2_fastq_file
+    echo "ADD_DUPLICATE_BC: "$ADD_DUPLICATE_BC
     echo
-        
-    ../../../horizontalMerge-padUMI.awk R2_info.txt \
+
+    # Set output file name based on barcodes added to 5' end of R2 read
+    if [[ $ADD_DUPLICATE_BC == "i5" ]]; then
+        output_fastq_file="${file_prefix}"_I2_I2_I1_padUMI_R2.fastq
+    elif [[ $ADD_DUPLICATE_BC == "i7i5" ]]; then
+        output_fastq_file="${file_prefix}"_I1_I2_I2_I1_padUMI_R2.fastq
+    else
+        output_fastq_file="${file_prefix}"_I2_I1_padUMI_R2.fastq
+    fi
+
+    awk -v addDuplicateBC="$ADD_DUPLICATE_BC" -f ../../../horizontalMerge-padUMI-addDupBC.awk R2_info.txt \
     <(paste <(zcat $input_I2_fastq_file) <(zcat $input_I1_fastq_file) <(zcat $input_R2_fastq_file)) \
-    > "${file_prefix}"_I2_I1_padUMI_R2.fastq
+    > $output_fastq_file
+
+    # Extra demultiplexing step in needed
+    if [[ $ADD_DUPLICATE_BC == "i5" ]]; then
+        echo "Demultiplexing on i5tag"
+        #cutadapt -e 0.15 --no-indels -g file:i5tag-barcodes.fa -o {name}-I2-I1-padUMI-R2.fastq -p {name}-R1.fastq \
+        #<file_I2-I2-I1-padUMI-R2.fastq> <file_R1.fastq.gz> > <i5tagBC.demux.log>
+        #//--- concatenate by sample of origin
+    elif [[ $ADD_DUPLICATE_BC == "i7i5" ]]; then
+        echo "Demultiplexing on i7tag and i5tag"
+        #cutadapt -e 0.15 --no-indels -g file:i5tag-barcodes.fa -o {name}-I2-I1-padUMI-R2.fastq -p {name}-R1.fastq \
+        #<file_I2-I2-I1-padUMI-R2.fastq> <file_R1.fastq.gz> > <i5tagBC.demux.log>
+        #//--- concatenate by sample of origin
+    else
+        echo "No extra demultiplexing needed"
+    fi
 
     # Clean up
     # none
@@ -145,7 +174,7 @@ generate_whitelist() {
     file_prefix=`echo $(basename $I2_I1_padUMI_R2_fastq_file .gz) | cut -d "_" -f 1`
 
     echo
-    echo "generate_whitelist()"
+    echo "Running module generate_whitelist()"
     echo "file_prefix: "$file_prefix
     echo "I2_I1_padUMI_R2_fastq_file: "$I2_I1_padUMI_R2_fastq_file
     echo
@@ -188,7 +217,7 @@ run_extract() {
     file_prefix=`echo $(basename $input_R1_fastq_file .gz) | cut -d "_" -f 1`
 
     echo
-    echo "run_extract()"
+    echo "Running module run_extract()"
     echo "file_prefix: "$file_prefix
     echo "input_R1_fastq_file: "$input_R1_fastq_file
     echo "I2_I1_padUMI_R2_fastq_file: "$I2_I1_padUMI_R2_fastq_file
@@ -227,7 +256,7 @@ cutadapt_trim5pME(){
     file_prefix=`echo $(basename $hBC_UMI_R2_fastq_file .gz) | cut -d "_" -f 1`
 
     echo
-    echo "cutadapt_trim5pME()"
+    echo "Running module cutadapt_trim5pME()"
     echo "file_prefix: "$file_prefix
     echo "hBC_UMI_R2_fastq_file: "$hBC_UMI_R2_fastq_file
     echo "hBC_UMI_R1_fastq_file: "$hBC_UMI_R1_fastq_file
@@ -265,7 +294,7 @@ cutadapt_trim3pAd(){
     file_prefix=`echo $(basename $hasME_hBC_UMI_R2_fastq_file .gz) | cut -d "_" -f 1`
 
     echo
-    echo "cutadapt_trim3pAd()"
+    echo "Running module cutadapt_trim3pAd()"
     echo "file_prefix: "$file_prefix
     echo "hasME_hBC_UMI_R2_fastq_file: "$hasME_hBC_UMI_R2_fastq_file
     echo "hasME_hBC_UMI_R1_fastq_file: "$hasME_hBC_UMI_R1_fastq_file
@@ -302,63 +331,64 @@ cutadapt_trim3pAd(){
 
 }
 
+#trimPE(){
 
-trimPE(){
+#    cd fastqs
+#    ls -1 *_R1.fastq* > .R1
+#    ls -1 *_R2.fastq* > .R2
+#    paste -d " " .R1 .R2 > Reads.list
 
-    cd fastqs
-    ls -1 *_R1.fastq* > .R1
-    ls -1 *_R2.fastq* > .R2
-    paste -d " " .R1 .R2 > Reads.list
+#    readarray fastqs < Reads.list
+#    mkdir fastQC
 
-    readarray fastqs < Reads.list
-    mkdir fastQC
+#    for i in "${fastqs[@]}"
+#    do
+#        $TRIM --nextseq 20 --length 20  --paired --gzip --fastqc --fastqc_args "-t 4 --outdir ./fastQC" $i
+#    done
 
-    for i in "${fastqs[@]}"
-    do
-        $TRIM --nextseq 20 --length 20  --paired --gzip --fastqc --fastqc_args "-t 4 --outdir ./fastQC" $i
-    done
+#    mkdir TrimQC_stats trimmed_fastqs
+#    mv *_trimming_report.txt TrimQC_stats
+#    mv *_val* trimmed_fastqs
+#    mv TrimQC_stats fastQC trimmed_fastqs ../
 
-    mkdir TrimQC_stats trimmed_fastqs
-    mv *_trimming_report.txt TrimQC_stats
-    mv *_val* trimmed_fastqs
-    mv TrimQC_stats fastQC trimmed_fastqs ../
+#    cd ..
+#}
 
-    cd ..
-}
+#trimHiSeqPE(){
 
+#    cd fastqs
+#    ls -1 *_1.fq* > .R1
+#    ls -1 *_2.fq* > .R2
+#    paste -d " " .R1 .R2 > Reads.list
 
-trimHiSeqPE(){
+#    readarray fastqs < Reads.list
+#    mkdir fastQC
 
-    cd fastqs
-    ls -1 *_1.fq* > .R1
-    ls -1 *_2.fq* > .R2
-    paste -d " " .R1 .R2 > Reads.list
+#    for i in "${fastqs[@]}"
+#    do
+#        trim_galore --quality 20 --gzip --length 20  --paired --fastqc --fastqc_args "-t 4 --outdir ./fastQC" $i
+#    done
 
-    readarray fastqs < Reads.list
-    mkdir fastQC
+#    mkdir TrimQC_stats trimmed_fastqs
+#    mv *_trimming_report.txt TrimQC_stats
+#    mv *_val* trimmed_fastqs
+#    mv TrimQC_stats fastQC trimmed_fastqs ..
 
-    for i in "${fastqs[@]}"
-    do
-        trim_galore --quality 20 --gzip --length 20  --paired --fastqc --fastqc_args "-t 4 --outdir ./fastQC" $i
-    done
+#    cd ..
+#}
 
-    mkdir TrimQC_stats trimmed_fastqs
-    mv *_trimming_report.txt TrimQC_stats
-    mv *_val* trimmed_fastqs
-    mv TrimQC_stats fastQC trimmed_fastqs ..
-
-    cd ..
-}
-
-
-# xxx
-#//--- Need the mm10 / hg38 genome
+# Map reads with bwa mem
 alignPE(){
 
     cd "${FOLDER}"/fastqs/trimmed_fastqs/
 
-    ls -1 *_val_1.fq.gz > .trR1
-    ls -1 *_val_2.fq.gz > .trR2
+    echo
+    echo "Running module alignPE()"
+    echo
+
+    # Set up pairs of fastq files
+    ls -1 *_val_1.f*.gz > .trR1
+    ls -1 *_val_2.f*.gz > .trR2
     paste -d " " .trR1 .trR2 > Trimmed.list
 
     readarray trimmedFastqs < Trimmed.list
@@ -366,16 +396,20 @@ alignPE(){
     for i in "${trimmedFastqs[@]}"
 
     do
-        # INDEX="/workdir/genomes/Mus_musculus/mm10/ENSEMBL/BWAIndex/genome.fa"
-        iSUB=`echo $i | cut -d ${DELIMITER} -f${FIELD}`
+        iSUB=`echo $i | cut -d "_" -f 1`
+        #iSUB=`echo $i | cut -d ${DELIMITER} -f${FIELD}`
 
-        bwa mem -t 24 -M -R "@RG\tID:${iSUB}\tSM:${iSUB}\tPL:ILLUMINA\tLB:${iSUB}\tPU:1" ${genomeDir[${DIR}]} $i \
+        echo "file_prefix: "$iSUB
+        echo "Read 1 and Read 2 fastq files: "$i
+
+        bwa mem -v 3 -t 24 -M -R "@RG\tID:${iSUB}\tSM:${iSUB}\tPL:ILLUMINA\tLB:${iSUB}\tPU:1" ${genomeDir[${DIR}]} $i \
+        2> ${iSUB}_bwaLog.txt \
         | samtools view -@ 24 -b -h -F 0x0100 -O BAM -o ${iSUB}.bam
     done
 
     mkdir primary_BAMS
     mv *.bam primary_BAMS
-    mv primary-BAMS ..
+    mv primary_BAMS ..
     cd ../../..
 
 }
@@ -384,8 +418,13 @@ sort(){
 
     cd "${FOLDER}"/fastqs/primary_BAMS
 
+    echo
+    echo "Running module sort()"
+    echo
+
     for i in *.bam
     do
+        echo "Sorting file: "$i
         samtools sort $i > `echo  $i | cut -d "." -f1`.sorted.bam
     done
 
@@ -406,14 +445,22 @@ sort(){
 
 }
 
+# Remove mitocondrial reads
 rmMT(){
 
     cd "${FOLDER}"/fastqs/primary_BAMS
+
+    echo
+    echo "Running module rmMT()"
+    echo
 
     for i in *.sorted.bam
     do
 
         iSUB=`echo $i | cut -d "." -f1`
+
+        echo "file_prefix: "$iSUB
+        echo "BAM file: "$i
 
         samtools view -H `ls -1 *.sorted.bam | head -1` | cut -f2 | grep "SN:" |  cut -d ":" -f2 | grep -v "MT\|_\|\." | xargs samtools view -b $i > ${iSUB}.noMT.bam
 
@@ -421,13 +468,23 @@ rmMT(){
     cd ../../..
 }
 
+# Mark duplicates
+#//--- need to do this with UMI_tools instead of Picard (or have this as an option)
 markDups(){
 
     cd "${FOLDER}"/fastqs/primary_BAMS
 
+    echo
+    echo "Running module markDups()"
+    echo
+
     for i in *.noMT.bam
     do
         iSUB=`echo $i | cut -d "." -f1`
+
+        echo "file_prefix: "$iSUB
+        echo "BAM file: "$i
+
         java -jar /programs/bin/picard-tools/picard.jar \
         MarkDuplicates \
         INPUT=$i \
@@ -446,10 +503,18 @@ dedupBAM(){
 
     cd "${FOLDER}"/fastqs/primary_BAMS
 
+    echo
+    echo "Running module dedupBAM()"
+    echo
+
     # alignment stats etc. on dupMarked no MT bams
     for i in *.dupMarked.noMT.bam
     do
         iSUB=`echo $i | cut -d "." -f1`
+
+        echo "file_prefix: "$iSUB
+        echo "BAM file: "$i
+
         samtools index $i
         samtools flagstat $i > ${iSUB}.noMT.flagstat
         samtools idxstats $i > ${iSUB}.noMT.idxstats
@@ -468,23 +533,40 @@ dedupBAM(){
 
     mkdir dedup_BAMS
     mv *.DEDUP* dedup_BAMS/
-    mv dedup-BAMS ..
+    mv dedup_BAMS ..
     cd ../../..
 
 }
 
 tagDir(){
+
     cd "${FOLDER}"/fastqs/dedup_BAMS
+
+    echo
+    echo "Running module tagDir()"
+    echo
 
     for i in *.DEDUP.bam
     do
-    iSUB=`echo "$i" | cut -d'.' -f1` # subset to rename
-    /home/fa286/bin/HOMER/bin/makeTagDirectory "$iSUB".tag.dir "$i"
+        iSUB=`echo "$i" | cut -d'.' -f1` # subset to rename
+
+        echo "file_prefix: "$iSUB
+        echo "BAM file: "$i
+
+        /workdir/prm88/homer/bin/makeTagDirectory "$iSUB".tag.dir "$i"
     done
     cd ../../..
 }
 
 callPeak(){
+
+    # Assumes that environment variables already set up for macs2
+    # export PYTHONPATH=/programs/macs2-2.2.7.1/lib64/python3.6/site-packages
+    # export PATH=/programs/macs2-2.2.7.1/bin:$PATH
+
+    echo
+    echo "Running module callPeak()"
+    echo
 
     cd "${FOLDER}"/fastqs/dedup_BAMS
 
@@ -493,6 +575,10 @@ callPeak(){
     for i  in *.DEDUP.bam
     do
         iSUB=`echo $i | cut -d "." -f1`
+
+        echo "file_prefix: "$iSUB
+        echo "BAM file: "$i
+
         macs2 callpeak -t $i \
         -f BAMPE \
         -n ${iSUB} \
@@ -507,11 +593,17 @@ callPeak(){
 
 }
 
-
 mergedPeaks(){
 
-    echo "running module mergedPeaks"
-    cd "${FOLDER}"/fastqs/dedup_BAMS
+    # Assumes that environment variables already set up for macs2
+    # export PYTHONPATH=/programs/macs2-2.2.7.1/lib64/python3.6/site-packages
+    # export PATH=/programs/macs2-2.2.7.1/bin:$PATH
+
+   cd "${FOLDER}"/fastqs/dedup_BAMS
+
+    echo
+    echo "Running module mergedPeaks()"
+    echo
 
     allBams=`echo *.DEDUP.bam`
 
@@ -527,24 +619,34 @@ mergedPeaks(){
     cd ../../..
 }
 
-
 saf(){
+
     # awk 'BEGIN{FS=OFS="\t"; print "GeneID\tChr\tStart\tEnd\tStrand"}{print $4, $1, $2+1, $3, "."}' ${sample}_peaks.narrowPeak > ${sample}_peaks.saf
     cd "${FOLDER}"/fastqs/dedup_BAMS/peaks.OUT
+
+    echo
+    echo "Running module saf()"
+    echo
 
     awk 'BEGIN{FS=OFS="\t"; print "GeneID\tChr\tStart\tEnd\tStrand"}{print $4, $1, $2+1, $3, "."}' allSamplesMergedPeakset_peaks.narrowPeak > allSamplesMergedPeakset.saf
     cd ../../../..
 }
 
-#saf
-
 frip(){
     # featureCounts -p -a ${sample}_peaks.saf -F SAF -o readCountInPeaks.txt ${sample}.sorted.marked.filtered.shifted.bam
     cd "${FOLDER}"/fastqs/dedup_BAMS/
 
+    echo
+    echo "Running module frip()"
+    echo
+
     for i  in *.DEDUP.bam
     do
         iSUB=`echo $i | cut -d "." -f1`
+
+        echo "file_prefix: "$iSUB
+        echo "BAM file: "$i
+
         featureCounts -p -a peaks.OUT/allSamplesMergedPeakset.saf -F SAF -o "${iSUB}".readCountInPeaks.txt $i
     done
 
@@ -554,13 +656,22 @@ frip(){
 annotatePeaks(){
 
     cd "${FOLDER}"/fastqs/dedup_BAMS/peaks.OUT
-    /home/fa286/bin/HOMER/bin/annotatePeaks.pl allSamplesMergedPeakset.saf ${DIR} -gtf ${gtfs[${DIR}]} > allSamplesMergedPeakset.Annotated.saf
+
+    echo
+    echo "Running module annotatePeaks()"
+    echo
+
+    /workdir/prm88/homer/bin/annotatePeaks.pl allSamplesMergedPeakset.saf ${DIR} -gtf ${gtfs[${DIR}]} > allSamplesMergedPeakset.Annotated.saf
     cd ../../../..
 }
 
 bedGraphs(){
 
     cd "${FOLDER}"/fastqs/dedup_BAMS
+
+    echo
+    echo "Running module bedGraphs()"
+    echo
 
     for i in *.tag.dir
     do
@@ -593,6 +704,10 @@ atacQC(){
 
     cd "${FOLDER}"/fastqs/dedup_BAMS
 
+    echo
+    echo "Running module atacQC()"
+    echo
+
     echo "genome alias" = ${gAlias[${DIR}]}
     /programs/R-3.6.3/bin/Rscript /home/fa286/bin/scripts/atacQC.R ${gAlias[${DIR}]}
     # ${gAlias[${DIR}]}
@@ -605,7 +720,7 @@ atacQC(){
 }
 
 
-while getopts "hp:t:g:q:d:f:s:" opt; do
+while getopts "hp:t:g:q:d:f:s:a:" opt; do
     case ${opt} in
 
     h)
@@ -658,6 +773,11 @@ while getopts "hp:t:g:q:d:f:s:" opt; do
 
     s)
         SINGLE_STEP=$OPTARG
+
+    ;;
+
+    a)
+        ADD_DUPLICATE_BC=$OPTARG
 
     ;;
 
@@ -736,6 +856,18 @@ fi
                         fi
                     fi
 
+                    ## check ADD_DUPLICATE_BC parameter
+
+                    if [[ -z "${ADD_DUPLICATE_BC}" ]]; then
+                        ADD_DUPLICATE_BC="NoAction"
+                    else
+
+                        if [[ $ADD_DUPLICATE_BC != "i5" && $ADD_DUPLICATE_BC != "i7i5" && $ADD_DUPLICATE_BC != "NoAction" ]]; then
+                            echo "-a only accepts i5, i7i5, or NoAction as arguments"
+                            exit 1
+                        fi
+                    fi
+
                     #-------------------------------------------------------------------------------------------------------------
                     #-------------------------------------------------------------------------------------------------------------
                     ## check if genomeDir provided
@@ -748,7 +880,7 @@ fi
                             # else execute only the step passed as a parameter
                             if [[ -z "${SINGLE_STEP}" ]]; then
                                 findMESequence
-                                horizontalMerge_padUMI
+                                horizontalMerge_padUMI_addDupBC
                                 generate_whitelist
                                 run_extract
                                 cutadapt_trim5pME
@@ -770,8 +902,8 @@ fi
                                 # execute any string passed in by the user which cound be quite dangerous
                                 if [[ $SINGLE_STEP == findMESequence ]]; then
                                     findMESequence
-                                elif [[ $SINGLE_STEP == horizontalMerge_padUMI ]]; then
-                                    horizontalMerge_padUMI
+                                elif [[ $SINGLE_STEP == horizontalMerge_padUMI_addDupBC ]]; then
+                                    horizontalMerge_padUMI_addDupBC
                                 elif [[ $SINGLE_STEP == generate_whitelist ]]; then
                                     generate_whitelist
                                 elif [[ $SINGLE_STEP == run_extract ]]; then
@@ -864,7 +996,7 @@ else
     # echo "multiqc version:" `~/miniconda2/envs/RSC/bin/multiqc --version` >> beta5.atac.log
     echo "samtools version:" `/programs/bin/samtools/samtools --version` >> beta5.atac.log
     echo "macs2 version: macs2 2.1.0.20150731 " >> beta5.atac.log
-    echo "HOMER version: v4.10.4" >> beta5.atac.log
+    echo "HOMER version: v4.11.1" >> beta5.atac.log
     echo -------------------------------------------------------------------------------------------------- >> beta5.atac.log
 
 fi

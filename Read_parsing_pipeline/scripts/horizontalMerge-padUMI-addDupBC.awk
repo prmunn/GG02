@@ -6,7 +6,7 @@
 # 
 # where addDuplicateBC is a text string which indicates the following:
 #     i5 - add a duplicate i5 (I2 read) barcode to the 5' end of the R2 read
-#     i7i5 - add a duplicate i7 (I1 read) and a duplicate i5 (I2 read) barcode to the 5' end of the R2 read
+#     i7i5 - add a duplicate i7tagBC (from R2 read) and a duplicate i5 (I2 read) barcode to the 5' end of the R2 read
 #     NoAction - do nothing (do not add a duplicate barcode)
 
 BEGIN {
@@ -27,7 +27,7 @@ BEGIN {
 	if(x==1) {		#read header row
 		t++;		#read counter
 		n=a[t];		#expected read name
-        	p=b[t];		#pad distance, based on info file
+        p=b[t];		#pad distance, based on info file
 		split($2,s," ");
 		split($3,r," ");
  		if(n != s[1] || n != r[1]) { 		#error! read name mismatch	for some reason, I2 headers are different (first fields)!!??
@@ -40,9 +40,9 @@ BEGIN {
 	if(x==2) {								# pad read
 		ORS="";								# this seems to work
 		if (addDuplicateBC=="i5") print $1;	# Add I2 read (i5tag-BC) to 5' end of R2
-		if (addDuplicateBC=="i7i5") {		# Add R2 read (i7tag-BC) and I2 read (i5tag-BC) to 5' end of R2
-			#print $2; # Get i7tagBC
-			print $1;
+		if (addDuplicateBC=="i7i5") {		# Add i7tag-BC and I2 read (i5tag-BC) to 5' end of R2
+			print substr($3, 11-p, 10);		# i7tag-BC: 10nt immediately prior to ME sequence (11 - pad distance gives the start of the BC)
+			print $1;						# I2 read (i5tag-BC)
 			}
 		print $1;							# I2 read (i5tag-BC) -- put i5tag-BC at 5' end, optional sample-level demux on i5tag subset (but would need to keep i5tagBC in R2 after demux!)
 		print $2;							# I1 read (i7PCR-BC)
@@ -63,8 +63,13 @@ BEGIN {
 		}
 	if(x==0) {
 		ORS="";
-		print $1;                            	#I2 read (i5tag-BC). Match order and any changes made to read seq above.
-		print $2;                            	#I1 read (i7PCR-BC). Match order and any changes made to read seq above.
+		if (addDuplicateBC=="i5") print $1;		# Add I2 read (i5tag-BC) to 5' end of R2
+		if (addDuplicateBC=="i7i5") {			# Add i7tag-BC and I2 read (i5tag-BC) to 5' end of R2
+			print substr($3, 11-p, 10);			# i7tag-BC: 10nt immediately prior to ME sequence (11 - pad distance gives the start of the BC)
+			print $1;                   	   	# I2 read (i5tag-BC). Match order and any changes made to read seq above.
+			}
+		print $1;                            	# I2 read (i5tag-BC). Match order and any changes made to read seq above.
+		print $2;                            	# I1 read (i7PCR-BC). Match order and any changes made to read seq above.
 		for(i=1;i<=p;i++) {
 			print "I";			# high base quality, preserve padded base identities through any filtering steps
 			}

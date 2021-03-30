@@ -24,11 +24,22 @@ usage(){
     echo "[-d] --> Comma Spearated Values for Delimiter and Field <delim,field or default> default: _,5 "
     echo "[-t] --> Trimming <nextseq or nova>;"
     echo "[-q] --> Execute atacQC.R script <yes>"
-    echo "[-s] --> Execute single step"
-    echo "[-a] --> Add duplicate barcode to 5' end of R2 read <i5 or i7i5>, default: No barcode added"
+    echo "[-s] --> Execute single step <step name>"
+    echo "[-a] --> Add duplicate barcode(s) to 5' end of R2 read <i5 or i7i5>, default: No barcode added"
+    echo
+    echo "---------------------------------------------------------------------------------------------------------------"
+    echo "Assumes that the following environment variables have been set up"
+    echo "For UMI_tools:"
+    echo "export PYTHONPATH=/programs/UMI-tools/lib/python3.6/site-packages:/programs/UMI-tools/lib64/python3.6/site-packages"
+    echo "export PATH=/programs/UMI-tools/bin:$PATH"
+    echo "For macs2:"
+    echo "export PYTHONPATH=/programs/macs2-2.2.7.1/lib64/python3.6/site-packages"
+    echo "export PATH=/programs/macs2-2.2.7.1/bin:$PATH"
+    echo "For annotatePeaks.pl"
+    echo "export PATH=/workdir/tools/homer/bin:$PATH"
+    echo
     echo "---------------------------------------------------------------------------------------------------------------"
 }
-
 
 
 declare -A genomeDir
@@ -112,6 +123,7 @@ horizontalMerge_padUMI_addDupBC(){
 
     # Set file names
     input_R2_fastq_file=("${RELATIVE_ORIG_FASTQ}"/*_R2_001.fastq.gz)
+    input_R1_fastq_file=("${RELATIVE_ORIG_FASTQ}"/*_R1_001.fastq.gz)
     input_I1_fastq_file=("${RELATIVE_ORIG_FASTQ}"/*_I1_001.fastq.gz)
     input_I2_fastq_file=("${RELATIVE_ORIG_FASTQ}"/*_I2*.f*.gz)
     file_prefix=`echo $(basename $input_R2_fastq_file .gz) | cut -d "_" -f 1`
@@ -120,6 +132,7 @@ horizontalMerge_padUMI_addDupBC(){
     echo "Running module horizontalMerge_padUMI_addDupBC()"
     echo "file_prefix: "$file_prefix
     echo "input_R2_fastq_file: "$input_R2_fastq_file
+    echo "input_R1_fastq_file: "$input_R1_fastq_file
     echo "input_I1_fastq_file: "$input_I1_fastq_file
     echo "input_I2_fastq_file: "$input_I2_fastq_file
     echo "ADD_DUPLICATE_BC: "$ADD_DUPLICATE_BC
@@ -127,34 +140,76 @@ horizontalMerge_padUMI_addDupBC(){
 
     # Set output file name based on barcodes added to 5' end of R2 read
     if [[ $ADD_DUPLICATE_BC == "i5" ]]; then
-        output_fastq_file="${file_prefix}"_I2_I2_I1_padUMI_R2.fastq
+        merge_output_fastq_file="${file_prefix}"_I2_I2_I1_padUMI_R2.fastq
     elif [[ $ADD_DUPLICATE_BC == "i7i5" ]]; then
-        output_fastq_file="${file_prefix}"_I1_I2_I2_I1_padUMI_R2.fastq
+        merge_output_fastq_file="${file_prefix}"_i7tag_I2_I2_I1_padUMI_R2.fastq
     else
-        output_fastq_file="${file_prefix}"_I2_I1_padUMI_R2.fastq
+        merge_output_fastq_file="${file_prefix}"_I2_I1_padUMI_R2.fastq
     fi
 
     awk -v addDuplicateBC="$ADD_DUPLICATE_BC" -f ../../../horizontalMerge-padUMI-addDupBC.awk R2_info.txt \
     <(paste <(zcat $input_I2_fastq_file) <(zcat $input_I1_fastq_file) <(zcat $input_R2_fastq_file)) \
-    > $output_fastq_file
+    > $merge_output_fastq_file
 
     # Extra demultiplexing step in needed
     if [[ $ADD_DUPLICATE_BC == "i5" ]]; then
         echo "Demultiplexing on i5tag"
-        #cutadapt -e 0.15 --no-indels -g file:i5tag-barcodes.fa -o {name}-I2-I1-padUMI-R2.fastq -p {name}-R1.fastq \
-        #<file_I2-I2-I1-padUMI-R2.fastq> <file_R1.fastq.gz> > <i5tagBC.demux.log>
-        #//--- concatenate by sample of origin
+        cutadapt -e 0.15 \
+        --no-indels \
+        -g file:"${RELATIVE_ORIG_FASTQ}"/i5tagBC_barcodes.fa 
+        -o {name}_I2_I1_padUMI_R2.fastq 
+        -p {name}_R1.fastq \
+        $merge_output_fastq_file \
+        $input_R1_fastq_file \
+        > "${file_prefix}"_i5tagBC_demux.log
+
     elif [[ $ADD_DUPLICATE_BC == "i7i5" ]]; then
         echo "Demultiplexing on i7tag and i5tag"
-        #cutadapt -e 0.15 --no-indels -g file:i5tag-barcodes.fa -o {name}-I2-I1-padUMI-R2.fastq -p {name}-R1.fastq \
-        #<file_I2-I2-I1-padUMI-R2.fastq> <file_R1.fastq.gz> > <i5tagBC.demux.log>
-        #//--- concatenate by sample of origin
+        cutadapt -e 0.15 \
+        --no-indels \
+        -g file:"${RELATIVE_ORIG_FASTQ}"/i7tagBC_i5tagBC_barcodes.fa \
+        -o {name}_I2_I1_padUMI_R2.fastq \
+        -p {name}_R1.fastq \
+        $merge_output_fastq_file \
+        $input_R1_fastq_file \
+        > "${file_prefix}"_i7tagBC_i5tagBC_demux.log
+
     else
         echo "No extra demultiplexing needed"
+        # No demultiplexed R1 files, so copy the original R1 fastq and gzip the padded R2 fastq
+        cp $input_R1_fastq_file "${file_prefix}"_R1.fastq.gz
+        gzip -c $merge_output_fastq_file
     fi
 
-    # Clean up
-    # none
+    # If extra demultiplexing step executed, then concatenate by sample of origin
+    if [[ $ADD_DUPLICATE_BC == "i5" || $ADD_DUPLICATE_BC == "i7i5" ]]; then
+
+        mkdir demuxed_fastqs
+        mv *~*.fastq demuxed_fastqs
+        cd demuxed_fastqs
+
+        ls -1 *~*_R2.fastq | cut -d "~" -f 1 | uniq > samples.list
+
+        readarray samples < samples.list
+
+        for i in "${samples[@]}"
+        do
+            # First trim blank chrs from ends of i
+            trimmed_i=`echo -e $i | awk '{$1=$1;print}'`
+            # Then concatenate files with the same sample name
+            cat $trimmed_i*_R2.fastq | gzip > ../"${trimmed_i}"_I2_I1_padUMI_R2.fastq.gz
+            cat $trimmed_i*_R1.fastq | gzip > ../"${trimmed_i}"_R1.fastq.gz
+        done
+
+        cd ..
+
+        # Gzip the last od the demuxed files
+        if [ -f unknown_I2_I1_padUMI_R2.fastq ]; then
+            gzip unknown_I2_I1_padUMI_R2.fastq
+            gzip unknown_R1.fastq
+        fi
+
+    fi
 
     cd ../../..
 
@@ -167,32 +222,37 @@ generate_whitelist() {
     # export PYTHONPATH=/programs/UMI-tools/lib/python3.6/site-packages:/programs/UMI-tools/lib64/python3.6/site-packages
     # export PATH=/programs/UMI-tools/bin:$PATH
 
-    cd "${FOLDER}"/fastqs/parsed_BCs/
-
-    # Set file names
-    I2_I1_padUMI_R2_fastq_file=(*I2_I1_padUMI_R2.fastq)
-    file_prefix=`echo $(basename $I2_I1_padUMI_R2_fastq_file .gz) | cut -d "_" -f 1`
-
     echo
     echo "Running module generate_whitelist()"
-    echo "file_prefix: "$file_prefix
-    echo "I2_I1_padUMI_R2_fastq_file: "$I2_I1_padUMI_R2_fastq_file
     echo
 
-    # Run umi_tools whitelist to generate cell barcode whitelist (specific to dataset). 
-    # This step may require testing different options to get the optimal whitelist 
-    # (e.g. --error-correct-threshold, --knee-method=[density/distance], --method=[reads/umis]).
-    umi_tools whitelist --knee-method=density \
-    --method=reads \
-    --plot-prefix "${file_prefix}"_predictBC \
-    --allow-threshold-error \
-    --extract-method string \
-    --bc-pattern=CCCCCCCCCCCCCCCCNNNNNNNNNNCCCCCCCCCC \
-    --error-correct-threshold=2 \
-    --ed-above-threshold=correct \
-    -L "${file_prefix}"_predictedBCwhitelist.log \
-    -I $I2_I1_padUMI_R2_fastq_file \
-    -S "${file_prefix}"_predictedBCwhitelist.txt
+    cd "${FOLDER}"/fastqs/parsed_BCs/
+
+    # Loop thru gziped pad UMI fastq files
+    for I2_I1_padUMI_R2_fastq_file in *_R2.fastq.gz
+    do
+        # Set file prefix
+        file_prefix=`echo $(basename $I2_I1_padUMI_R2_fastq_file .gz) | cut -d "_" -f 1`
+
+        echo "file_prefix: "$file_prefix
+        echo "I2_I1_padUMI_R2_fastq_file: "$I2_I1_padUMI_R2_fastq_file
+
+        # Run umi_tools whitelist to generate cell barcode whitelist (specific to dataset). 
+        # This step may require testing different options to get the optimal whitelist 
+        # (e.g. --error-correct-threshold, --knee-method=[density/distance], --method=[reads/umis]).
+        umi_tools whitelist --knee-method=density \
+        --method=reads \
+        --plot-prefix "${file_prefix}"_predictBC \
+        --allow-threshold-error \
+        --extract-method string \
+        --bc-pattern=CCCCCCCCCCCCCCCCNNNNNNNNNNCCCCCCCCCC \
+        --error-correct-threshold=2 \
+        --ed-above-threshold=correct \
+        -L "${file_prefix}"_predictedBCwhitelist.log \
+        -I $I2_I1_padUMI_R2_fastq_file \
+        -S "${file_prefix}"_predictedBCwhitelist.txt
+
+    done
 
     cd ../../..
 
@@ -206,35 +266,45 @@ run_extract() {
     # export PYTHONPATH=/programs/UMI-tools/lib/python3.6/site-packages:/programs/UMI-tools/lib64/python3.6/site-packages
     # export PATH=/programs/UMI-tools/bin:$PATH
 
-    cd "${FOLDER}"/fastqs/parsed_BCs/
-
-    RELATIVE_ORIG_FASTQ=../"${ORIG_FASTQ}"
-
-    # Set file names
-    input_R1_fastq_file=("${RELATIVE_ORIG_FASTQ}"/*_R1_001.fastq.gz)
-    I2_I1_padUMI_R2_fastq_file=(*I2_I1_padUMI_R2.fastq)
-    predictedBCwhitelist_file=(*_predictedBCwhitelist.txt)
-    file_prefix=`echo $(basename $input_R1_fastq_file .gz) | cut -d "_" -f 1`
-
     echo
     echo "Running module run_extract()"
-    echo "file_prefix: "$file_prefix
-    echo "input_R1_fastq_file: "$input_R1_fastq_file
-    echo "I2_I1_padUMI_R2_fastq_file: "$I2_I1_padUMI_R2_fastq_file
-    echo "predictedBCwhitelist_file: "$predictedBCwhitelist_file
     echo
 
-    umi_tools extract --extract-method=string \
-    --quality-filter-mask 20 \
-    --quality-encoding phred33 \
-    -p CCCCCCCCCCCCCCCCNNNNNNNNNNCCCCCCCCCC \
-    --whitelist $predictedBCwhitelist_file \
-    --error-correct-cell \
-    -I $I2_I1_padUMI_R2_fastq_file \
-    -S "${file_prefix}"_hBC_UMI_R2.fastq.gz \
-    --read2-in=$input_R1_fastq_file \
-    --read2-out="${file_prefix}"_hBC_UMI_R1.fastq.gz \
-    -L "${file_prefix}"_extractBC.log
+    cd "${FOLDER}"/fastqs/parsed_BCs/
+
+    # Loop thru gziped pad UMI fastq files
+    for I2_I1_padUMI_R2_fastq_file in *_R2.fastq.gz
+    do
+        # Set file prefix
+        file_prefix=`echo $(basename $I2_I1_padUMI_R2_fastq_file .gz) | cut -d "_" -f 1`
+
+        # Set file names
+        input_R1_fastq_file=("${file_prefix}"_R1.fastq.gz)
+        predictedBCwhitelist_file=("${file_prefix}"_predictedBCwhitelist.txt)
+
+        echo "file_prefix: "$file_prefix
+        echo "I2_I1_padUMI_R2_fastq_file: "$I2_I1_padUMI_R2_fastq_file
+        echo "input_R1_fastq_file: "$input_R1_fastq_file
+        echo "predictedBCwhitelist_file: "$predictedBCwhitelist_file
+
+        umi_tools extract --extract-method=string \
+        --quality-filter-mask 20 \
+        --quality-encoding phred33 \
+        -p CCCCCCCCCCCCCCCCNNNNNNNNNNCCCCCCCCCC \
+        --whitelist $predictedBCwhitelist_file \
+        --error-correct-cell \
+        -I $I2_I1_padUMI_R2_fastq_file \
+        -S "${file_prefix}"_hBC_UMI_R2.fastq.gz \
+        --read2-in=$input_R1_fastq_file \
+        --read2-out="${file_prefix}"_hBC_UMI_R1.fastq.gz \
+        -L "${file_prefix}"_extractBC.log
+
+    done
+
+    mkdir extract_fastqs
+    mv *_hBC* extract_fastqs
+    mv *_extractBC.log extract_fastqs
+    mv extract_fastqs ..
 
     cd ../../..
 
@@ -244,37 +314,49 @@ run_extract() {
 # file (do not use). Again, R2 is the ‘driver’ because it should now contain the ME sequence at the 5’ end
 cutadapt_trim5pME(){
 
-    cd "${FOLDER}"/fastqs/parsed_BCs/
-
-    # Delete output files from any prior runs
-    rm -f *_noME_hBC_UMI_*
-    rm -f *_hasME_hBC_UMI_*
-
-    # Set file names
-    hBC_UMI_R2_fastq_file=(*_hBC_UMI_R2.fastq.gz)
-    hBC_UMI_R1_fastq_file=(*_hBC_UMI_R1.fastq.gz)
-    file_prefix=`echo $(basename $hBC_UMI_R2_fastq_file .gz) | cut -d "_" -f 1`
-
     echo
     echo "Running module cutadapt_trim5pME()"
-    echo "file_prefix: "$file_prefix
-    echo "hBC_UMI_R2_fastq_file: "$hBC_UMI_R2_fastq_file
-    echo "hBC_UMI_R1_fastq_file: "$hBC_UMI_R1_fastq_file
     echo
 
-    # Require 5'ME in R2
-    cutadapt -g ^AGATGTGTATAAGAGACAG \
-    -e 0.11 \
-    -j 10 \
-    --no-indels \
-    --match-read-wildcards \
-    --untrimmed-output "${file_prefix}"_noME_hBC_UMI_R2.fastq.gz \
-    --untrimmed-paired-output "${file_prefix}"_noME_hBC_UMI_R1.fastq.gz \
-    -o "${file_prefix}"_hasME_hBC_UMI_R2.fastq.gz \
-    -p "${file_prefix}"_hasME_hBC_UMI_R1.fastq.gz \
-    $hBC_UMI_R2_fastq_file \
-    $hBC_UMI_R1_fastq_file \
-    > "${file_prefix}"_trim5pME_log.out
+    cd "${FOLDER}"/fastqs/extract_fastqs/
+
+    # Delete output files from any prior runs
+    #rm -f *_noME_hBC_UMI_*
+    #rm -f *_hasME_hBC_UMI_*
+
+    # Loop thru gziped pad UMI fastq files
+    for hBC_UMI_R2_fastq_file in *_hBC_UMI_R2.fastq.gz
+    do
+        # Set file prefix
+        file_prefix=`echo $(basename $hBC_UMI_R2_fastq_file .gz) | cut -d "_" -f 1`
+
+        # Set file names
+        hBC_UMI_R1_fastq_file=("${file_prefix}"_hBC_UMI_R1.fastq.gz)
+
+        echo "file_prefix: "$file_prefix
+        echo "hBC_UMI_R2_fastq_file: "$hBC_UMI_R2_fastq_file
+        echo "hBC_UMI_R1_fastq_file: "$hBC_UMI_R1_fastq_file
+
+        # Require 5'ME in R2
+        cutadapt -g ^AGATGTGTATAAGAGACAG \
+        -e 0.11 \
+        -j 10 \
+        --no-indels \
+        --match-read-wildcards \
+        --untrimmed-output "${file_prefix}"_noME_hBC_UMI_R2.fastq.gz \
+        --untrimmed-paired-output "${file_prefix}"_noME_hBC_UMI_R1.fastq.gz \
+        -o "${file_prefix}"_hasME_hBC_UMI_R2.fastq.gz \
+        -p "${file_prefix}"_hasME_hBC_UMI_R1.fastq.gz \
+        $hBC_UMI_R2_fastq_file \
+        $hBC_UMI_R1_fastq_file \
+        > "${file_prefix}"_trim5pME.log
+
+    done
+
+    mkdir hasME_hBC_fastqs
+    mv *_hasME_hBC_* hasME_hBC_fastqs
+    mv *_noME_hBC_* hasME_hBC_fastqs
+    mv hasME_hBC_fastqs ..
 
     cd ../../..
 
@@ -286,36 +368,43 @@ cutadapt_trim5pME(){
 # R2 is listed first because that has been the pattern in this pipeline, but the order of R1/R2 doesn’t matter (R1/R2 adaptors are the same).
 cutadapt_trim3pAd(){
 
-    cd "${FOLDER}"/fastqs/parsed_BCs/
-
-    # Set file names
-    hasME_hBC_UMI_R2_fastq_file=(*hasME_hBC_UMI_R2.fastq.gz)
-    hasME_hBC_UMI_R1_fastq_file=(*hasME_hBC_UMI_R1.fastq.gz)
-    file_prefix=`echo $(basename $hasME_hBC_UMI_R2_fastq_file .gz) | cut -d "_" -f 1`
-
     echo
     echo "Running module cutadapt_trim3pAd()"
-    echo "file_prefix: "$file_prefix
-    echo "hasME_hBC_UMI_R2_fastq_file: "$hasME_hBC_UMI_R2_fastq_file
-    echo "hasME_hBC_UMI_R1_fastq_file: "$hasME_hBC_UMI_R1_fastq_file
     echo
 
-    # Don't need this directory if not using trim_galore - talk to Faraz about this
+    cd "${FOLDER}"/fastqs/hasME_hBC_fastqs/
+
+    #//--- need to add fastQC to this function
     mkdir fastQC
 
-    # Use cutadapt to trim R1/R2 for 3’ME-rev (e.g. small inserts) and for 3’quality 
-    # (standard 3’adaptor/quality trimming for PE reads). Then move to mapping, peak calling steps.
-    cutadapt -a CTGTCTCTTATACACATCT \
-    -A CTGTCTCTTATACACATCT \
-    -q 20 \
-    -m 50 \
-    -j 10 \
-    --match-read-wildcards \
-    -o "${file_prefix}"_trimmed_val_2.fastq.gz \
-    -p "${file_prefix}"_trimmed_val_1.fastq.gz \
-    $hasME_hBC_UMI_R2_fastq_file \
-    $hasME_hBC_UMI_R1_fastq_file \
-    > "${file_prefix}"_trim3pAd.log
+    # Loop thru gziped pad UMI fastq files
+    for hasME_hBC_UMI_R2_fastq_file in *hasME_hBC_UMI_R2.fastq.gz
+    do
+        # Set file prefix
+        file_prefix=`echo $(basename $hasME_hBC_UMI_R2_fastq_file .gz) | cut -d "_" -f 1`
+
+        # Set file names
+        hasME_hBC_UMI_R1_fastq_file=("${file_prefix}"_hasME_hBC_UMI_R1.fastq.gz)
+
+        echo "file_prefix: "$file_prefix
+        echo "hasME_hBC_UMI_R2_fastq_file: "$hasME_hBC_UMI_R2_fastq_file
+        echo "hasME_hBC_UMI_R1_fastq_file: "$hasME_hBC_UMI_R1_fastq_file
+
+        # Use cutadapt to trim R1/R2 for 3’ME-rev (e.g. small inserts) and for 3’quality 
+        # (standard 3’adaptor/quality trimming for PE reads). Then move to mapping, peak calling steps.
+        cutadapt -a CTGTCTCTTATACACATCT \
+        -A CTGTCTCTTATACACATCT \
+        -q 20 \
+        -m 50 \
+        -j 10 \
+        --match-read-wildcards \
+        -o "${file_prefix}"_trimmed_val_2.fastq.gz \
+        -p "${file_prefix}"_trimmed_val_1.fastq.gz \
+        $hasME_hBC_UMI_R2_fastq_file \
+        $hasME_hBC_UMI_R1_fastq_file \
+        > "${file_prefix}"_trim3pAd.log
+
+    done
 
     #for i in "${fastqs[@]}"
     #do
@@ -403,13 +492,14 @@ alignPE(){
         echo "Read 1 and Read 2 fastq files: "$i
 
         bwa mem -v 3 -t 24 -M -R "@RG\tID:${iSUB}\tSM:${iSUB}\tPL:ILLUMINA\tLB:${iSUB}\tPU:1" ${genomeDir[${DIR}]} $i \
-        2> ${iSUB}_bwaLog.txt \
+        2> ${iSUB}_bwa.log \
         | samtools view -@ 24 -b -h -F 0x0100 -O BAM -o ${iSUB}.bam
     done
 
     mkdir primary_BAMS
     mv *.bam primary_BAMS
     mv primary_BAMS ..
+
     cd ../../..
 
 }
@@ -425,20 +515,20 @@ sort(){
     for i in *.bam
     do
         echo "Sorting file: "$i
-        samtools sort $i > `echo  $i | cut -d "." -f1`.sorted.bam
+        samtools sort $i > `echo  $i | cut -d "." -f1`_sorted.bam
     done
 
-    for i in *.sorted.bam
+    for i in *_sorted.bam
     do
         samtools index $i
     done
 
     # alignment stats etc. on raw bams
-    for i in *.sorted.bam
+    for i in *_sorted.bam
     do
-        iSUB=`echo $i | cut -d "." -f1`
-        samtools flagstat $i > ${iSUB}.primary.flagstat
-        samtools idxstats $i > ${iSUB}.primary.idxstats
+        iSUB=`echo $i | cut -d "_" -f1`
+        samtools flagstat $i > ${iSUB}_primary.flagstat
+        samtools idxstats $i > ${iSUB}_primary.idxstats
     done
 
     cd ../../..
@@ -454,17 +544,19 @@ rmMT(){
     echo "Running module rmMT()"
     echo
 
-    for i in *.sorted.bam
+    for i in *_sorted.bam
     do
 
-        iSUB=`echo $i | cut -d "." -f1`
+        iSUB=`echo $i | cut -d "_" -f1`
 
         echo "file_prefix: "$iSUB
         echo "BAM file: "$i
 
-        samtools view -H `ls -1 *.sorted.bam | head -1` | cut -f2 | grep "SN:" |  cut -d ":" -f2 | grep -v "MT\|_\|\." | xargs samtools view -b $i > ${iSUB}.noMT.bam
+        # //--- make sure the grep still works after changing '.' to '_' in the input file
+        samtools view -H `ls -1 *_sorted.bam | head -1` | cut -f2 | grep "SN:" |  cut -d ":" -f2 | grep -v "MT\|_\|\." | xargs samtools view -b $i > ${iSUB}_noMT.bam
 
     done
+
     cd ../../..
 }
 
@@ -478,9 +570,9 @@ markDups(){
     echo "Running module markDups()"
     echo
 
-    for i in *.noMT.bam
+    for i in *_noMT.bam
     do
-        iSUB=`echo $i | cut -d "." -f1`
+        iSUB=`echo $i | cut -d "_" -f1`
 
         echo "file_prefix: "$iSUB
         echo "BAM file: "$i
@@ -488,10 +580,10 @@ markDups(){
         java -jar /programs/bin/picard-tools/picard.jar \
         MarkDuplicates \
         INPUT=$i \
-        OUTPUT=${iSUB}.dupMarked.noMT.bam \
+        OUTPUT=${iSUB}_dupMarked_noMT.bam \
         ASSUME_SORTED=true \
         REMOVE_DUPLICATES=false \
-        METRICS_FILE=${iSUB}.MarkDuplicates.metrics.txt \
+        METRICS_FILE=${iSUB}_MarkDuplicates_metrics.txt \
         VALIDATION_STRINGENCY=LENIENT \
         TMP_DIR=tmp
 
@@ -508,32 +600,33 @@ dedupBAM(){
     echo
 
     # alignment stats etc. on dupMarked no MT bams
-    for i in *.dupMarked.noMT.bam
+    for i in *_dupMarked_noMT.bam
     do
-        iSUB=`echo $i | cut -d "." -f1`
+        iSUB=`echo $i | cut -d "_" -f1`
 
         echo "file_prefix: "$iSUB
         echo "BAM file: "$i
 
         samtools index $i
-        samtools flagstat $i > ${iSUB}.noMT.flagstat
-        samtools idxstats $i > ${iSUB}.noMT.idxstats
+        samtools flagstat $i > ${iSUB}_noMT.flagstat
+        samtools idxstats $i > ${iSUB}_noMT.idxstats
     done
 
-    for i in *.dupMarked.noMT.bam
+    for i in *_dupMarked_noMT.bam
     do
-        iSUB=`echo $i | cut -d "." -f1`
-        samtools view -b -h -F 0X400 $i > ${iSUB}.DEDUP.bam
+        iSUB=`echo $i | cut -d "_" -f1`
+        samtools view -b -h -F 0X400 $i > ${iSUB}_DEDUP.bam
     done
 
-    for i in *.DEDUP.bam; do samtools index $i ; samtools idxstats $i > `echo $i | cut -d "." -f1`.DEDUP.idxstats; done
-    for i in *.DEDUP.bam; do samtools flagstat $i > `echo $i | cut -d "." -f1`.DEDUP.flagstat; done
+    for i in *_DEDUP.bam; do samtools index $i ; samtools idxstats $i > `echo $i | cut -d "_" -f1`_DEDUP.idxstats; done
+    for i in *_DEDUP.bam; do samtools flagstat $i > `echo $i | cut -d "_" -f1`_DEDUP.flagstat; done
 
-    multiqc -n ${PIN}.multiqc.report .
+    multiqc -n ${PIN}_multiqc.report .
 
     mkdir dedup_BAMS
-    mv *.DEDUP* dedup_BAMS/
+    mv *_DEDUP* dedup_BAMS/
     mv dedup_BAMS ..
+
     cd ../../..
 
 }
@@ -546,14 +639,14 @@ tagDir(){
     echo "Running module tagDir()"
     echo
 
-    for i in *.DEDUP.bam
+    for i in *_DEDUP.bam
     do
-        iSUB=`echo "$i" | cut -d'.' -f1` # subset to rename
+        iSUB=`echo "$i" | cut -d'_' -f1` # subset to rename
 
         echo "file_prefix: "$iSUB
         echo "BAM file: "$i
 
-        /workdir/prm88/homer/bin/makeTagDirectory "$iSUB".tag.dir "$i"
+        /workdir/tools/homer/bin/makeTagDirectory "$iSUB"_tag.dir "$i" -genome ${genomeDir[${DIR}]}
     done
     cd ../../..
 }
@@ -572,9 +665,9 @@ callPeak(){
 
     echo "calling peaks on DEDUP bams"
     mkdir peaks.OUT
-    for i  in *.DEDUP.bam
+    for i  in *_DEDUP.bam
     do
-        iSUB=`echo $i | cut -d "." -f1`
+        iSUB=`echo $i | cut -d "_" -f1`
 
         echo "file_prefix: "$iSUB
         echo "BAM file: "$i
@@ -605,7 +698,7 @@ mergedPeaks(){
     echo "Running module mergedPeaks()"
     echo
 
-    allBams=`echo *.DEDUP.bam`
+    allBams=`echo *_DEDUP.bam`
 
     macs2 callpeak -t ${allBams} \
     -f BAMPE \
@@ -628,11 +721,13 @@ saf(){
     echo "Running module saf()"
     echo
 
-    awk 'BEGIN{FS=OFS="\t"; print "GeneID\tChr\tStart\tEnd\tStrand"}{print $4, $1, $2+1, $3, "."}' allSamplesMergedPeakset_peaks.narrowPeak > allSamplesMergedPeakset.saf
+    awk 'BEGIN{FS=OFS="\t"; print "GeneID\tChr\tStart\tEnd\tStrand"}{print $4, $1, $2+1, $3, "."}' allSamplesMergedPeakset.peaks.narrowPeak > allSamplesMergedPeakset.saf
     cd ../../../..
 }
 
+# Count mapped reads for genomic features
 frip(){
+
     # featureCounts -p -a ${sample}_peaks.saf -F SAF -o readCountInPeaks.txt ${sample}.sorted.marked.filtered.shifted.bam
     cd "${FOLDER}"/fastqs/dedup_BAMS/
 
@@ -640,14 +735,14 @@ frip(){
     echo "Running module frip()"
     echo
 
-    for i  in *.DEDUP.bam
+    for i  in *_DEDUP.bam
     do
-        iSUB=`echo $i | cut -d "." -f1`
+        iSUB=`echo $i | cut -d "_" -f1`
 
         echo "file_prefix: "$iSUB
         echo "BAM file: "$i
 
-        featureCounts -p -a peaks.OUT/allSamplesMergedPeakset.saf -F SAF -o "${iSUB}".readCountInPeaks.txt $i
+        /workdir/tools/subread/bin/featureCounts -p -a peaks.OUT/allSamplesMergedPeakset.saf -F SAF -o "${iSUB}"_readCountInPeaks.txt $i
     done
 
     cd ../../..
@@ -661,7 +756,7 @@ annotatePeaks(){
     echo "Running module annotatePeaks()"
     echo
 
-    /workdir/prm88/homer/bin/annotatePeaks.pl allSamplesMergedPeakset.saf ${DIR} -gtf ${gtfs[${DIR}]} > allSamplesMergedPeakset.Annotated.saf
+    /workdir/tools/homer/bin/annotatePeaks.pl allSamplesMergedPeakset.saf ${genomeDir[${DIR}]} -gtf ${gtfs[${DIR}]} > allSamplesMergedPeakset_Annotated.saf
     cd ../../../..
 }
 
@@ -673,17 +768,17 @@ bedGraphs(){
     echo "Running module bedGraphs()"
     echo
 
-    for i in *.tag.dir
+    for i in *_tag.dir
     do
         makeUCSCfile ${i} -o auto -fsize 1e10 -res 1 -color 106,42,73 -style chipseq
     done
 
     mkdir tagDirs
-    mv *.tag.dir tagDirs
+    mv *_tag.dir tagDirs
     cd tagDirs
     mkdir bedGraphs
 
-    for i in *.tag.dir
+    for i in *_tag.dir
     do
         cd $i
         zcat *.ucsc.bedGraph.gz | awk '{if(NR>1) print "chr"$0; else print $0}' | gzip > `basename *.ucsc.bedGraph.gz .ucsc.bedGraph.gz`.ucsc.bg.gz
@@ -695,7 +790,7 @@ bedGraphs(){
     mkdir featureCounts
     mv *.txt featureCounts
 
-    multiqc -n ${PIN}.FRIP.multiqc.report -b "Please note that the featureCounts M Assigned Column refers to Fragments and Not Reads" --ignore tagDirs --ignore peaks.OUT .
+    multiqc -n ${PIN}_FRIP_multiqc.report -b "Please note that the featureCounts M Assigned Column refers to Fragments and Not Reads" --ignore tagDirs --ignore peaks.OUT .
 
     cd ../../..
 }
@@ -709,9 +804,9 @@ atacQC(){
     echo
 
     echo "genome alias" = ${gAlias[${DIR}]}
-    /programs/R-3.6.3/bin/Rscript /home/fa286/bin/scripts/atacQC.R ${gAlias[${DIR}]}
+    /programs/R-3.6.3/bin/Rscript /workdir/tools/atacQC/bin/scripts/atacQC.R ${gAlias[${DIR}]}
     # ${gAlias[${DIR}]}
-    ~/bin/scripts/html.atacQC.sh `echo ${PIN}_atacQC`
+    /workdir/tools/atacQC/bin/scripts/html.atacQC.sh `echo ${PIN}_atacQC`
 
     cd ../../..
 
@@ -936,6 +1031,8 @@ fi
                                     annotatePeaks
                                 elif [[ $SINGLE_STEP == bedGraphs ]]; then
                                     bedGraphs
+                                elif [[ $SINGLE_STEP == atacQC ]]; then
+                                    atacQC
                                 elif [[ $SINGLE_STEP == no_step ]]; then
                                     # This is used when we are trimming (via the -t parameter) 
                                     # or running atacQC and don't want to perform any other steps

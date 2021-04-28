@@ -4,6 +4,8 @@
 #SBATCH -n 12
 #SBATCH --mem-per-cpu=18000
 
+# Note: parts of this script are also called from the UHT_ATACseq-pipeline 
+# script - if you make changes, make sure they also work for that pipeline
 source ~/.bash_profile
 
 usage(){
@@ -12,7 +14,7 @@ usage(){
     echo
     echo
 
-    echo "Usage: bash" $0 "-f arg -g arg [-h arg] [-p arg] [-d args] [-t arg] [-q arg] [-s arg] [-a arg]"
+    echo "Usage: bash" $0 "-f arg -g arg [-h arg] [-p arg] [-d args] [-t arg] [-q arg] [-s arg] [-a arg] [-c arg] [-u arg] [-e arg]"
     echo
     echo "Example: bash" $0 "-f GIA0130-AdrianBarnyard/ -g hg38_and_mm10 -s findMESequence"
     echo
@@ -26,17 +28,20 @@ usage(){
     echo "[-q] --> Execute atacQC.R script <yes>"
     echo "[-s] --> Execute single step <step name>"
     echo "[-a] --> Add duplicate barcode(s) to 5' end of R2 read <i5 or i7i5>, default: No barcode added"
+    echo "[-c] --> Define <sample>:<cell number> comma separated key / value pairs for whitelist command. e.g. sample1:2000,sample2:1600"
+    echo "[-u] --> Get parameters from <filename>. Note: Any parameters specified on the command line will override the contents of this file"
+    echo "[-e] --> Send email to this address when function completes"
     echo
     echo "---------------------------------------------------------------------------------------------------------------"
     echo "Assumes that the following environment variables have been set up"
     echo "For UMI_tools:"
     echo "export PYTHONPATH=/programs/UMI-tools/lib/python3.6/site-packages:/programs/UMI-tools/lib64/python3.6/site-packages"
-    echo "export PATH=/programs/UMI-tools/bin:$PATH"
+    echo "export PATH=/programs/UMI-tools/bin:\$PATH"
     echo "For macs2:"
     echo "export PYTHONPATH=/programs/macs2-2.2.7.1/lib64/python3.6/site-packages"
-    echo "export PATH=/programs/macs2-2.2.7.1/bin:$PATH"
+    echo "export PATH=/programs/macs2-2.2.7.1/bin:\$PATH"
     echo "For annotatePeaks.pl"
-    echo "export PATH=/workdir/tools/homer/bin:$PATH"
+    echo "export PATH=/workdir/tools/homer/bin:\$PATH"
     echo
     echo "---------------------------------------------------------------------------------------------------------------"
 }
@@ -46,9 +51,11 @@ declare -A genomeDir
 
 genomeDir=(
 ["mm10"]="/workdir/genomes/Mus_musculus/mm10/ENSEMBL/BWAIndex/genome.fa" \
-["hg38"]="/workdir/genomes/Homo_sapiens/hg38/ENSEMBL/bwa.index/Homo_sapiens.GRCh38.dna.toplevel.fa" \
+["hg38"]="/workdir/genomes/Homo_sapiens/hg38/ENSEMBL/Homo_sapiens.GRCh38.dna.toplevel.fa" \
 ["hg38_and_mm10"]="/workdir/singleCellData/10x_reference_files/refdata-cellranger-atac-GRCh38-and-mm10-1.2.0/fasta/genome.fa"
 )
+# Removed /bwa.index from the hg38 directory reference above
+# ["hg38"]="/workdir/genomes/Homo_sapiens/hg38/ENSEMBL/bwa.index/Homo_sapiens.GRCh38.dna.toplevel.fa" \
 
 declare -A gtfs
 
@@ -64,6 +71,8 @@ gAlias=(
 ["hg38"]="human" \
 ["hg38_and_mm10"]="human and mouse"
 )
+
+declare -A sample_cell_number_dict
 
 ORIG_FASTQ="orig-fastqs"
 
@@ -178,7 +187,7 @@ horizontalMerge_padUMI_addDupBC(){
         echo "No extra demultiplexing needed"
         # No demultiplexed R1 files, so copy the original R1 fastq and gzip the padded R2 fastq
         cp $input_R1_fastq_file "${file_prefix}"_R1.fastq.gz
-        gzip -c $merge_output_fastq_file
+        gzip $merge_output_fastq_file
     fi
 
     # If extra demultiplexing step executed, then concatenate by sample of origin
@@ -203,7 +212,7 @@ horizontalMerge_padUMI_addDupBC(){
 
         cd ..
 
-        # Gzip the last od the demuxed files
+        # Gzip the last of the demuxed files
         if [ -f unknown_I2_I1_padUMI_R2.fastq ]; then
             gzip unknown_I2_I1_padUMI_R2.fastq
             gzip unknown_R1.fastq
@@ -213,6 +222,12 @@ horizontalMerge_padUMI_addDupBC(){
 
     cd ../../..
 
+    # Notify user that process complete
+    if [[ ! -z "${EMAIL_TO}" ]]; then
+        subject="Message from "$0
+        message=${FUNCNAME[0]}" function, running for "$FOLDER" dataset, completed"
+        python send_email_v3.py $EMAIL_TO "${subject}" "${message}"
+    fi
 }
 
 # Step 3a) Optional: generate combBC whitelist with UMI_tools whitelist
@@ -240,22 +255,52 @@ generate_whitelist() {
         # Run umi_tools whitelist to generate cell barcode whitelist (specific to dataset). 
         # This step may require testing different options to get the optimal whitelist 
         # (e.g. --error-correct-threshold, --knee-method=[density/distance], --method=[reads/umis]).
-        umi_tools whitelist --knee-method=density \
-        --method=reads \
-        --plot-prefix "${file_prefix}"_predictBC \
-        --allow-threshold-error \
-        --extract-method string \
-        --bc-pattern=CCCCCCCCCCCCCCCCNNNNNNNNNNCCCCCCCCCC \
-        --error-correct-threshold=2 \
-        --ed-above-threshold=correct \
-        -L "${file_prefix}"_predictedBCwhitelist.log \
-        -I $I2_I1_padUMI_R2_fastq_file \
-        -S "${file_prefix}"_predictedBCwhitelist.txt
 
+        # If cell number defined for this sample then use it, otherwise use distance knee method
+        # for key in "${!sample_cell_number_dict[@]}"; do
+        #    echo "$key ${sample_cell_number_dict[$key]}"
+        # done
+        if [[ ! -z ${sample_cell_number_dict[${file_prefix}]} ]]; then
+            echo "Using density knee method with cell number = "${sample_cell_number_dict[$file_prefix]}
+
+            umi_tools whitelist --knee-method=density \
+            --set-cell-number=${sample_cell_number_dict[$file_prefix]} \
+            --method=reads \
+            --plot-prefix "${file_prefix}"_predictBC \
+            --allow-threshold-error \
+            --extract-method regex \
+            --bc-pattern='(?P<cell_1>.{16})(?P<umi_1>.{10})(?P<cell_2>.{10})' \
+            --error-correct-threshold=2 \
+            --ed-above-threshold=correct \
+            -L "${file_prefix}"_predictedBCwhitelist.log \
+            -I $I2_I1_padUMI_R2_fastq_file \
+            -S "${file_prefix}"_predictedBCwhitelist.txt
+
+        else
+            echo "Using distance knee method with no cell number"
+
+            umi_tools whitelist --knee-method=distance \
+            --method=reads \
+            --plot-prefix "${file_prefix}"_predictBC \
+            --allow-threshold-error \
+            --extract-method regex \
+            --bc-pattern='(?P<cell_1>.{16})(?P<umi_1>.{10})(?P<cell_2>.{10})' \
+            --error-correct-threshold=2 \
+            --ed-above-threshold=correct \
+            -L "${file_prefix}"_predictedBCwhitelist.log \
+            -I $I2_I1_padUMI_R2_fastq_file \
+            -S "${file_prefix}"_predictedBCwhitelist.txt
+        fi
     done
 
     cd ../../..
 
+    # Notify user that process complete
+    if [[ ! -z "${EMAIL_TO}" ]]; then
+        subject="Message from "$0
+        message=${FUNCNAME[0]}" function, running for "$FOLDER" dataset, completed"
+        python send_email_v3.py $EMAIL_TO "${subject}" "${message}"
+    fi
 }
 
 # Step 3b) Run umi_tools extract to move cell barcode and UMI to R1/R2 headers. 
@@ -286,28 +331,52 @@ run_extract() {
         echo "I2_I1_padUMI_R2_fastq_file: "$I2_I1_padUMI_R2_fastq_file
         echo "input_R1_fastq_file: "$input_R1_fastq_file
         echo "predictedBCwhitelist_file: "$predictedBCwhitelist_file
+        echo
 
-        umi_tools extract --extract-method=string \
-        --quality-filter-mask 20 \
-        --quality-encoding phred33 \
-        -p CCCCCCCCCCCCCCCCNNNNNNNNNNCCCCCCCCCC \
-        --whitelist $predictedBCwhitelist_file \
+        umi_tools extract --extract-method=regex \
+        -p '(?P<cell_1>.{16})(?P<umi_1>.{10})(?P<cell_2>.{10})' \
+        --filtered-out="${file_prefix}"_extract_filtered_out.txt \
+        --filtered-out2="${file_prefix}"_extract_filtered_out2.txt \
         --error-correct-cell \
+        --quality-filter-mask=20 \
+        --quality-encoding=phred33 \
+        --whitelist=$predictedBCwhitelist_file \
         -I $I2_I1_padUMI_R2_fastq_file \
         -S "${file_prefix}"_hBC_UMI_R2.fastq.gz \
         --read2-in=$input_R1_fastq_file \
         --read2-out="${file_prefix}"_hBC_UMI_R1.fastq.gz \
         -L "${file_prefix}"_extractBC.log
 
+        # Old code - remove after testing new code
+        # umi_tools extract --extract-method=string \
+        # --filter-cell-barcode \
+        # --error-correct-cell \
+        # --quality-filter-mask 20 \
+        # --quality-encoding phred33 \
+        # -p CCCCCCCCCCCCCCCCNNNNNNNNNNCCCCCCCCCC \
+        # --whitelist $predictedBCwhitelist_file \
+        # -I $I2_I1_padUMI_R2_fastq_file \
+        # -S "${file_prefix}"_hBC_UMI_R2.fastq.gz \
+        # --read2-in=$input_R1_fastq_file \
+        # --read2-out="${file_prefix}"_hBC_UMI_R1.fastq.gz \
+        # -L "${file_prefix}"_extractBC.log
+
     done
 
     mkdir extract_fastqs
     mv *_hBC* extract_fastqs
     mv *_extractBC.log extract_fastqs
+    mv *_extract_filtered_out* extract_fastqs
     mv extract_fastqs ..
 
     cd ../../..
 
+    # Notify user that process complete
+    if [[ ! -z "${EMAIL_TO}" ]]; then
+        subject="Message from "$0
+        message=${FUNCNAME[0]}" function, running for "$FOLDER" dataset, completed"
+        python send_email_v3.py $EMAIL_TO "${subject}" "${message}"
+    fi
 }
 
 # Step 4) Use cutadapt to trim (and require) 5' anchored ME in R2; write untrimmed paired reads to separate 
@@ -360,6 +429,12 @@ cutadapt_trim5pME(){
 
     cd ../../..
 
+    # Notify user that process complete
+    if [[ ! -z "${EMAIL_TO}" ]]; then
+        subject="Message from "$0
+        message=${FUNCNAME[0]}" function, running for "$FOLDER" dataset, completed"
+        python send_email_v3.py $EMAIL_TO "${subject}" "${message}"
+    fi
 }
 
 
@@ -418,6 +493,12 @@ cutadapt_trim3pAd(){
 
     cd ../../..
 
+    # Notify user that process complete
+    if [[ ! -z "${EMAIL_TO}" ]]; then
+        subject="Message from "$0
+        message=${FUNCNAME[0]}" function, running for "$FOLDER" dataset, completed"
+        python send_email_v3.py $EMAIL_TO "${subject}" "${message}"
+    fi
 }
 
 #trimPE(){
@@ -502,6 +583,12 @@ alignPE(){
 
     cd ../../..
 
+    # Notify user that process complete
+    if [[ ! -z "${EMAIL_TO}" ]]; then
+        subject="Message from "$0
+        message=${FUNCNAME[0]}" function, running for "$FOLDER" dataset, completed"
+        python send_email_v3.py $EMAIL_TO "${subject}" "${message}"
+    fi
 }
 
 sort(){
@@ -561,63 +648,112 @@ rmMT(){
 }
 
 # Mark duplicates
-#//--- need to do this with UMI_tools instead of Picard (or have this as an option)
-markDups(){
+# markDups(){
+
+#    cd "${FOLDER}"/fastqs/primary_BAMS
+
+#    echo
+#    echo "Running module markDups()"
+#    echo
+
+#    for i in *_noMT.bam
+#    do
+#        iSUB=`echo $i | cut -d "_" -f1`
+
+#        echo "file_prefix: "$iSUB
+#        echo "BAM file: "$i
+
+#        java -jar /programs/bin/picard-tools/picard.jar \
+#        MarkDuplicates \
+#        INPUT=$i \
+#        OUTPUT=${iSUB}_dupMarked_noMT.bam \
+#        ASSUME_SORTED=true \
+#        REMOVE_DUPLICATES=false \
+#        METRICS_FILE=${iSUB}_MarkDuplicates_metrics.txt \
+#        VALIDATION_STRINGENCY=LENIENT \
+#        TMP_DIR=tmp
+
+#    done
+#    cd ../../..
+# }
+
+# dedupBAM(){
+
+#    cd "${FOLDER}"/fastqs/primary_BAMS
+
+#    echo
+#    echo "Running module dedupBAM()"
+#    echo
+
+#    # alignment stats etc. on dupMarked no MT bams
+#    for i in *_dupMarked_noMT.bam
+#    do
+#        iSUB=`echo $i | cut -d "_" -f1`
+
+#        echo "file_prefix: "$iSUB
+#        echo "BAM file: "$i
+
+#        samtools index $i
+#        samtools flagstat $i > ${iSUB}_noMT.flagstat
+#        samtools idxstats $i > ${iSUB}_noMT.idxstats
+#    done
+
+#    for i in *_dupMarked_noMT.bam
+#    do
+#        iSUB=`echo $i | cut -d "_" -f1`
+#        samtools view -b -h -F 0X400 $i > ${iSUB}_DEDUP.bam
+#    done
+
+#    for i in *_DEDUP.bam; do samtools index $i ; samtools idxstats $i > `echo $i | cut -d "_" -f1`_DEDUP.idxstats; done
+#    for i in *_DEDUP.bam; do samtools flagstat $i > `echo $i | cut -d "_" -f1`_DEDUP.flagstat; done
+
+#    multiqc -n ${PIN}_multiqc.report .
+
+#    mkdir dedup_BAMS
+#    mv *_DEDUP* dedup_BAMS/
+#    mv dedup_BAMS ..
+
+#    cd ../../..
+
+# }
+
+dedupBAM_with_UMI_tools(){
 
     cd "${FOLDER}"/fastqs/primary_BAMS
 
     echo
-    echo "Running module markDups()"
+    echo "Running module dedupBAM_with_UMI_tools()"
     echo
 
-    for i in *_noMT.bam
+    for noMT_BAM_file in *_noMT.bam
     do
-        iSUB=`echo $i | cut -d "_" -f1`
+        # Set file prefix
+        file_prefix=`echo $(basename $noMT_BAM_file .bam) | cut -d "_" -f 1`
 
-        echo "file_prefix: "$iSUB
-        echo "BAM file: "$i
+        echo "file_prefix: "$file_prefix
+        echo "noMT_BAM_file: "$noMT_BAM_file
 
-        java -jar /programs/bin/picard-tools/picard.jar \
-        MarkDuplicates \
-        INPUT=$i \
-        OUTPUT=${iSUB}_dupMarked_noMT.bam \
-        ASSUME_SORTED=true \
-        REMOVE_DUPLICATES=false \
-        METRICS_FILE=${iSUB}_MarkDuplicates_metrics.txt \
-        VALIDATION_STRINGENCY=LENIENT \
-        TMP_DIR=tmp
+        samtools index $noMT_BAM_file
+
+        # Dedup crashes if you attempt to sort the output
+        # Added --no-sort-output and use samtools to do the sorting
+        umi_tools dedup --paired \
+        --per-cell \
+        --no-sort-output \
+        --unmapped-reads=discard \
+        --chimeric-pairs=discard \
+        --unpaired-reads=discard \
+        --output-stats="${file_prefix}"_dedup \
+        -L "${file_prefix}"_dedup.log \
+        -I $noMT_BAM_file \
+        -S "${file_prefix}"_DEDUP_unsorted.bam
+
+        samtools sort "${file_prefix}"_DEDUP_unsorted.bam -o "${file_prefix}"_DEDUP.bam
 
     done
-    cd ../../..
-}
 
-dedupBAM(){
-
-    cd "${FOLDER}"/fastqs/primary_BAMS
-
-    echo
-    echo "Running module dedupBAM()"
-    echo
-
-    # alignment stats etc. on dupMarked no MT bams
-    for i in *_dupMarked_noMT.bam
-    do
-        iSUB=`echo $i | cut -d "_" -f1`
-
-        echo "file_prefix: "$iSUB
-        echo "BAM file: "$i
-
-        samtools index $i
-        samtools flagstat $i > ${iSUB}_noMT.flagstat
-        samtools idxstats $i > ${iSUB}_noMT.idxstats
-    done
-
-    for i in *_dupMarked_noMT.bam
-    do
-        iSUB=`echo $i | cut -d "_" -f1`
-        samtools view -b -h -F 0X400 $i > ${iSUB}_DEDUP.bam
-    done
-
+    # Alignment stats etc. on DEDUP bams
+    #//--- Do we still need stats on dupMarked no MT bams ???
     for i in *_DEDUP.bam; do samtools index $i ; samtools idxstats $i > `echo $i | cut -d "_" -f1`_DEDUP.idxstats; done
     for i in *_DEDUP.bam; do samtools flagstat $i > `echo $i | cut -d "_" -f1`_DEDUP.flagstat; done
 
@@ -625,10 +761,17 @@ dedupBAM(){
 
     mkdir dedup_BAMS
     mv *_DEDUP* dedup_BAMS/
+    mv *_dedup* dedup_BAMS/
     mv dedup_BAMS ..
 
     cd ../../..
 
+    # Notify user that process complete
+    if [[ ! -z "${EMAIL_TO}" ]]; then
+        subject="Message from "$0
+        message=${FUNCNAME[0]}" function, running for "$FOLDER" dataset, completed"
+        python send_email_v3.py $EMAIL_TO "${subject}" "${message}"
+    fi
 }
 
 tagDir(){
@@ -814,8 +957,24 @@ atacQC(){
 
 }
 
+# Delete files we no longer need
+clean_up(){
 
-while getopts "hp:t:g:q:d:f:s:a:" opt; do
+    echo
+    echo "Running module clean_up()"
+    echo
+
+    cd "${FOLDER}"/fastqs/dedup_BAMS
+    rm *_DEDUP_unsorted.bam
+
+    # if [ -f R2_info.txt ]; then
+    #     rm -f R2_info.txt
+    # fi
+
+}
+
+
+while getopts "hp:t:g:q:d:f:s:a:c:u:e:" opt; do
     case ${opt} in
 
     h)
@@ -867,12 +1026,27 @@ while getopts "hp:t:g:q:d:f:s:a:" opt; do
     ;;
 
     s)
-        SINGLE_STEP=$OPTARG
+        SINGLE_STEP_LIST=$OPTARG
 
     ;;
 
     a)
         ADD_DUPLICATE_BC=$OPTARG
+
+    ;;
+
+    c)
+        SAMPLE_CELL_NUMBERS=$OPTARG
+
+    ;;
+
+    u)
+        PARAMETERS_FILE=$OPTARG
+
+    ;;
+
+    e)
+        EMAIL_TO=$OPTARG
 
     ;;
 
@@ -892,8 +1066,31 @@ done
 
 #-------------------------------------------------------------------------------------------------------------
 #-------------------------------------------------------------------------------------------------------------
-## check if PIN is provided
+## Process parameters file, but don't overwrite parameters passed in from the command line
+if [[ ! -z "${PARAMETERS_FILE}" ]]; then
 
+    echo
+    echo "Reading parameters file: " $PARAMETERS_FILE
+    echo
+
+    while IFS="=" read -r key value; do
+        case "$key" in
+            '#'*) ;;
+            *)
+                # echo $key "=" "${!key}"
+                if [[ -z "${!key}" ]]; then
+                    eval "$key=\"$value\""
+                    echo $key "=" $value
+                fi
+            ;;
+        esac
+    done < "$PARAMETERS_FILE"
+    echo
+fi
+
+#-------------------------------------------------------------------------------------------------------------
+#-------------------------------------------------------------------------------------------------------------
+## check if PIN is provided
 if [[ -z "${PIN+x}" ]]; then
 
     PIN="PIN_Null"
@@ -963,6 +1160,18 @@ fi
                         fi
                     fi
 
+                    ## check / process SAMPLE_CELL_NUMBERS parameter
+                    # No error checking: assumes correct format and no spaces
+                    if [[ ! -z "${SAMPLE_CELL_NUMBERS}" ]]; then
+                        for key_value in $(echo $SAMPLE_CELL_NUMBERS | sed "s/,/ /g")
+                        do
+                            # call your procedure/other scripts here below
+                            key=`echo $key_value | cut -d ':' -f 1`
+                            val=`echo $key_value | cut -d ':' -f 2`
+                            sample_cell_number_dict[$key]=$val
+                        done
+                    fi
+
                     #-------------------------------------------------------------------------------------------------------------
                     #-------------------------------------------------------------------------------------------------------------
                     ## check if genomeDir provided
@@ -973,7 +1182,7 @@ fi
                             echo
                             # If single step not set, execute all steps
                             # else execute only the step passed as a parameter
-                            if [[ -z "${SINGLE_STEP}" ]]; then
+                            if [[ -z "${SINGLE_STEP_LIST}" ]]; then
                                 findMESequence
                                 horizontalMerge_padUMI_addDupBC
                                 generate_whitelist
@@ -983,8 +1192,9 @@ fi
                                 alignPE
                                 sort
                                 rmMT
-                                markDups
-                                dedupBAM
+                                # markDups
+                                # dedupBAM
+                                dedupBAM_with_UMI_tools
                                 callPeak
                                 mergedPeaks
                                 saf
@@ -992,58 +1202,63 @@ fi
                                 tagDir
                                 annotatePeaks
                                 bedGraphs
+                                clean_up
                             else
-                                # Note: I could just call the function from the parameter, but that would 
-                                # execute any string passed in by the user which cound be quite dangerous
-                                if [[ $SINGLE_STEP == findMESequence ]]; then
-                                    findMESequence
-                                elif [[ $SINGLE_STEP == horizontalMerge_padUMI_addDupBC ]]; then
-                                    horizontalMerge_padUMI_addDupBC
-                                elif [[ $SINGLE_STEP == generate_whitelist ]]; then
-                                    generate_whitelist
-                                elif [[ $SINGLE_STEP == run_extract ]]; then
-                                    run_extract
-                                elif [[ $SINGLE_STEP == cutadapt_trim5pME ]]; then
-                                    cutadapt_trim5pME
-                                elif [[ $SINGLE_STEP == cutadapt_trim3pAd ]]; then
-                                    cutadapt_trim3pAd
-                                elif [[ $SINGLE_STEP == alignPE ]]; then
-                                    alignPE
-                                elif [[ $SINGLE_STEP == sort ]]; then
-                                    sort
-                                elif [[ $SINGLE_STEP == rmMT ]]; then
-                                    rmMT
-                                elif [[ $SINGLE_STEP == markDups ]]; then
-                                    markDups
-                                elif [[ $SINGLE_STEP == dedupBAM ]]; then
-                                    dedupBAM
-                                elif [[ $SINGLE_STEP == callPeak ]]; then
-                                    callPeak
-                                elif [[ $SINGLE_STEP == mergedPeaks ]]; then
-                                    mergedPeaks
-                                elif [[ $SINGLE_STEP == saf ]]; then
-                                    saf
-                                elif [[ $SINGLE_STEP == frip ]]; then
-                                    frip
-                                elif [[ $SINGLE_STEP == tagDir ]]; then
-                                    tagDir
-                                elif [[ $SINGLE_STEP == annotatePeaks ]]; then
-                                    annotatePeaks
-                                elif [[ $SINGLE_STEP == bedGraphs ]]; then
-                                    bedGraphs
-                                elif [[ $SINGLE_STEP == atacQC ]]; then
-                                    atacQC
-                                elif [[ $SINGLE_STEP == no_step ]]; then
-                                    # This is used when we are trimming (via the -t parameter) 
-                                    # or running atacQC and don't want to perform any other steps
-                                    exit 1
-                                else
-                                    echo
-                                    echo "Error: step '"$SINGLE_STEP"' is not defined"
-                                    echo "Please check your -s parameter"
-                                    echo
-                                    exit 1
-                                fi
+                                # No error checking: assumes correct format and no spaces
+                                for SINGLE_STEP in $(echo $SINGLE_STEP_LIST | sed "s/,/ /g")
+                                do
+                                    # Note: I could just call the function from the parameter, but that would 
+                                    # execute any string passed in by the user which cound be quite dangerous
+                                    if [[ $SINGLE_STEP == findMESequence ]]; then
+                                        findMESequence
+                                    elif [[ $SINGLE_STEP == horizontalMerge_padUMI_addDupBC ]]; then
+                                        horizontalMerge_padUMI_addDupBC
+                                    elif [[ $SINGLE_STEP == generate_whitelist ]]; then
+                                        generate_whitelist
+                                    elif [[ $SINGLE_STEP == run_extract ]]; then
+                                        run_extract
+                                    elif [[ $SINGLE_STEP == cutadapt_trim5pME ]]; then
+                                        cutadapt_trim5pME
+                                    elif [[ $SINGLE_STEP == cutadapt_trim3pAd ]]; then
+                                        cutadapt_trim3pAd
+                                    elif [[ $SINGLE_STEP == alignPE ]]; then
+                                        alignPE
+                                    elif [[ $SINGLE_STEP == sort ]]; then
+                                        sort
+                                    elif [[ $SINGLE_STEP == rmMT ]]; then
+                                        rmMT
+                                    elif [[ $SINGLE_STEP == dedupBAM_with_UMI_tools ]]; then
+                                        dedupBAM_with_UMI_tools
+                                    elif [[ $SINGLE_STEP == callPeak ]]; then
+                                        callPeak
+                                    elif [[ $SINGLE_STEP == mergedPeaks ]]; then
+                                        mergedPeaks
+                                    elif [[ $SINGLE_STEP == saf ]]; then
+                                        saf
+                                    elif [[ $SINGLE_STEP == frip ]]; then
+                                        frip
+                                    elif [[ $SINGLE_STEP == tagDir ]]; then
+                                        tagDir
+                                    elif [[ $SINGLE_STEP == annotatePeaks ]]; then
+                                        annotatePeaks
+                                    elif [[ $SINGLE_STEP == bedGraphs ]]; then
+                                        bedGraphs
+                                    elif [[ $SINGLE_STEP == atacQC ]]; then
+                                        atacQC
+                                    elif [[ $SINGLE_STEP == clean_up ]]; then
+                                        clean_up
+                                    elif [[ $SINGLE_STEP == no_step ]]; then
+                                        # This is used when we are trimming (via the -t parameter) 
+                                        # or running atacQC and don't want to perform any other steps
+                                        exit 1
+                                    else
+                                        echo
+                                        echo "Error: step '"$SINGLE_STEP"' is not defined"
+                                        echo "Please check your -s parameter"
+                                        echo
+                                        exit 1
+                                    fi
+                                done
                             fi
                         else
                             echo "The reference genome provided '"$DIR"' is not available"

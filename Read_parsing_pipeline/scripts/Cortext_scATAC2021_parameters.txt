@@ -1,0 +1,8 @@
+# Input parameters for Bo's Cortex dataset
+# Note: parameter lists should be comma separated with no whitespace
+FOLDER=Cortext_scATAC2021
+DIR=mm10
+ADD_DUPLICATE_BC=i7i5
+SINGLE_STEP_LIST=cutadapt_trim5pME,cutadapt_trim3pAd,alignPE,sort,rmMT,dedupBAM_with_UMI_tools
+SAMPLE_CELL_NUMBERS=BPA1B:2200,BPA2B:2200,BPA3B:2100,BPA4B:1500,Ctrl1B:2100,Ctrl2B:2200,Ctrl3B:2000,Ctrl4B:2100,Mix1B:2100,Mix2B:1700,Mix3B:2100,Mix4B:2000,unknown:750
+EMAIL_TO=prm88@cornell.edu,6072802109@vtext.com

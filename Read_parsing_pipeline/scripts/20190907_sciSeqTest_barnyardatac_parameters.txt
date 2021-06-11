@@ -1,0 +1,8 @@
+# Input parameters for 20190907_sciSeqTest_barnyardatac dataset
+# Note: parameter lists should be comma separated with no whitespace
+FOLDER=20190907_sciSeqTest_barnyardatac
+DIR=hg38_and_mm10
+SINGLE_STEP_LIST=findMESequence
+# SINGLE_STEP_LIST=cutadapt_trim5pME,cutadapt_trim3pAd,alignPE,sort,rmMT,dedupBAM_with_UMI_tools
+# SAMPLE_CELL_NUMBERS=GIA0130:700
+EMAIL_TO=prm88@cornell.edu,6072802109@vtext.com

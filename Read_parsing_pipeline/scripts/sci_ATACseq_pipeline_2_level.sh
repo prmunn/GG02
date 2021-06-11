@@ -42,6 +42,8 @@ usage(){
     echo "export PATH=/programs/macs2-2.2.7.1/bin:\$PATH"
     echo "For annotatePeaks.pl"
     echo "export PATH=/workdir/tools/homer/bin:\$PATH"
+    echo "For html.atacQC.sh"
+    echo "export PATH=/programs/pandoc-2.11.4/bin:\$PATH"
     echo
     echo "---------------------------------------------------------------------------------------------------------------"
 }
@@ -95,7 +97,7 @@ findMESequence(){
     fi
 
     # Set file names
-    input_R2_fastq_file=("${RELATIVE_ORIG_FASTQ}"/*_R2_001.fastq.gz)
+    input_R2_fastq_file=("${RELATIVE_ORIG_FASTQ}"/*_R2*.fastq.gz)
 
     echo
     echo "Running module findMESequence()"
@@ -131,9 +133,9 @@ horizontalMerge_padUMI_addDupBC(){
     RELATIVE_ORIG_FASTQ=../"${ORIG_FASTQ}"
 
     # Set file names
-    input_R2_fastq_file=("${RELATIVE_ORIG_FASTQ}"/*_R2_001.fastq.gz)
-    input_R1_fastq_file=("${RELATIVE_ORIG_FASTQ}"/*_R1_001.fastq.gz)
-    input_I1_fastq_file=("${RELATIVE_ORIG_FASTQ}"/*_I1_001.fastq.gz)
+    input_R2_fastq_file=("${RELATIVE_ORIG_FASTQ}"/*_R2*.f*.gz)
+    input_R1_fastq_file=("${RELATIVE_ORIG_FASTQ}"/*_R1*.f*.gz)
+    input_I1_fastq_file=("${RELATIVE_ORIG_FASTQ}"/*_I1*.f*q.gz)
     input_I2_fastq_file=("${RELATIVE_ORIG_FASTQ}"/*_I2*.f*.gz)
     file_prefix=`echo $(basename $input_R2_fastq_file .gz) | cut -d "_" -f 1`
 
@@ -187,7 +189,9 @@ horizontalMerge_padUMI_addDupBC(){
         echo "No extra demultiplexing needed"
         # No demultiplexed R1 files, so copy the original R1 fastq and gzip the padded R2 fastq
         cp $input_R1_fastq_file "${file_prefix}"_R1.fastq.gz
-        gzip $merge_output_fastq_file
+        # Unzip R1
+        gzip -d "${file_prefix}"_R1.fastq.gz
+        # gzip $merge_output_fastq_file
     fi
 
     # If extra demultiplexing step executed, then concatenate by sample of origin
@@ -206,19 +210,26 @@ horizontalMerge_padUMI_addDupBC(){
             # First trim blank chrs from ends of i
             trimmed_i=`echo -e $i | awk '{$1=$1;print}'`
             # Then concatenate files with the same sample name
-            cat $trimmed_i*_R2.fastq | gzip > ../"${trimmed_i}"_I2_I1_padUMI_R2.fastq.gz
-            cat $trimmed_i*_R1.fastq | gzip > ../"${trimmed_i}"_R1.fastq.gz
+            cat $trimmed_i*_R2.fastq > ../"${trimmed_i}"_I2_I1_padUMI_R2.fastq
+            cat $trimmed_i*_R1.fastq > ../"${trimmed_i}"_R1.fastq
+            # cat $trimmed_i*_R2.fastq | gzip > ../"${trimmed_i}"_I2_I1_padUMI_R2.fastq.gz
+            # cat $trimmed_i*_R1.fastq | gzip > ../"${trimmed_i}"_R1.fastq.gz
         done
 
         cd ..
 
         # Gzip the last of the demuxed files
-        if [ -f unknown_I2_I1_padUMI_R2.fastq ]; then
-            gzip unknown_I2_I1_padUMI_R2.fastq
-            gzip unknown_R1.fastq
-        fi
+        # if [ -f unknown_I2_I1_padUMI_R2.fastq ]; then
+        #    gzip unknown_I2_I1_padUMI_R2.fastq
+        #    gzip unknown_R1.fastq
+        # fi
 
     fi
+
+    mkdir horizontal_merge
+    mv *.fastq horizontal_merge
+    mv *.log horizontal_merge
+    mv horizontal_merge ..
 
     cd ../../..
 
@@ -241,13 +252,13 @@ generate_whitelist() {
     echo "Running module generate_whitelist()"
     echo
 
-    cd "${FOLDER}"/fastqs/parsed_BCs/
+    cd "${FOLDER}"/fastqs/horizontal_merge/
 
     # Loop thru gziped pad UMI fastq files
-    for I2_I1_padUMI_R2_fastq_file in *_R2.fastq.gz
+    for I2_I1_padUMI_R2_fastq_file in *_R2.fastq
     do
         # Set file prefix
-        file_prefix=`echo $(basename $I2_I1_padUMI_R2_fastq_file .gz) | cut -d "_" -f 1`
+        file_prefix=`echo $(basename $I2_I1_padUMI_R2_fastq_file .fastq) | cut -d "_" -f 1`
 
         echo "file_prefix: "$file_prefix
         echo "I2_I1_padUMI_R2_fastq_file: "$I2_I1_padUMI_R2_fastq_file
@@ -315,16 +326,16 @@ run_extract() {
     echo "Running module run_extract()"
     echo
 
-    cd "${FOLDER}"/fastqs/parsed_BCs/
+    cd "${FOLDER}"/fastqs/horizontal_merge/
 
     # Loop thru gziped pad UMI fastq files
-    for I2_I1_padUMI_R2_fastq_file in *_R2.fastq.gz
+    for I2_I1_padUMI_R2_fastq_file in *_R2.fastq
     do
         # Set file prefix
-        file_prefix=`echo $(basename $I2_I1_padUMI_R2_fastq_file .gz) | cut -d "_" -f 1`
+        file_prefix=`echo $(basename $I2_I1_padUMI_R2_fastq_file .fastq) | cut -d "_" -f 1`
 
         # Set file names
-        input_R1_fastq_file=("${file_prefix}"_R1.fastq.gz)
+        input_R1_fastq_file=("${file_prefix}"_R1.fastq)
         predictedBCwhitelist_file=("${file_prefix}"_predictedBCwhitelist.txt)
 
         echo "file_prefix: "$file_prefix
